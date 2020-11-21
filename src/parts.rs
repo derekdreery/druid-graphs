@@ -2,40 +2,55 @@
 
 use druid::{
     kurbo::{Line, Size},
-    piet::{Brush, Color, Font as PietFont, RenderContext},
+    piet::{self, Brush, Color, RenderContext},
     Data,
 };
-use std::ops::Range;
+use std::{marker::PhantomData, ops::Range};
 
 const DEFAULT_AXIS_COLOR: Color = Color::grey8(50);
 
-/// This is a lightweight object that holds references to everything it needs.
+/// An object that knows how to draw 2 axes for a graph.
 ///
 /// The axes need knowledge of each other to be able to position themselves correctly.
 #[derive(Debug, Clone, Data)]
-pub struct Axes<'a, Font, XUnit, YUnit> {
-    pub interval_font: Option<&'a Font>,
-    pub label_font: Option<&'a Font>,
-    pub axis_color: Color,
-    pub axis_width: f64,
-    pub text_color: Color,
-    pub x_axis: Option<XAxisData<'a, XUnit>>,
-    // y axis is always f64.
+pub struct Axes<Text> {
+    size: Size,
+    axis_color: Color,
+    axis_width: f64,
+    text_color: Color,
+    x_axis: Option<XAxisData>,
+    y_axis: Range<f64>,
+    dirty: bool,
+    text_marker: PhantomData<Text>,
 }
 
-impl<Font, XUnit, YUnit> Axes<'static, Font, XUnit, YUnit> {
+#[derive(Debug, Data, PartialEq)]
+pub enum XAxisData {
+    /// The data are in categories. This can also be used when the data have been put into buckets,
+    /// where each bucket is considered a category.
+    Categorical(Arc<Vec<String>>),
+    /// The data take a fixed set of points, but the distances between them are meaningful.
+    Discrete(Range<f64>),
+    /// The data can take any numeric value.
+    Continuous(Range<f64>),
+}
+
+impl<Text> Axes<Text> {
     pub fn new() -> Self {
         Axes {
+            size: Size::new(0., 0.),
             interval_font: None,
             label_font: None,
             axis_color: DEFAULT_AXIS_COLOR,
             text_color: Color::BLACK,
             x_axis: None,
+            dirty: true,
+            text_marker: PhantomData,
         }
     }
 }
 
-impl<'a, Font, XUnit, YUnit> Axes<'a, Font, XUnit, YUnit> {
+impl<Text> Axes<Text> {
     pub fn with_interval_font(self, interval_font: &'a Font) -> Self {
         self.interval_font = Some(interval_font);
         self
@@ -60,25 +75,25 @@ impl<'a, Font, XUnit, YUnit> Axes<'a, Font, XUnit, YUnit> {
         self.text_color = text_color;
         self
     }
+
+    pub fn with_size(self, size: Size) -> Self {
+        self.size = size;
+        self
+    }
+
+    fn build(&mut self) {
+        // TODO
+        self.dirty = false;
+    }
 }
 
-pub enum XAxisData<'iter, Unit> {
-    /// The data are in categories. This can also be used when the data have been put into buckets,
-    /// where each bucket is considered a category.
-    Categorical(&'iter dyn Iterator<Item = &'iter str>),
-    /// The data take a fixed set of points, but the distances between them are meaningful.
-    Discrete(Range<Unit>),
-    /// The data can take any numeric value.
-    Continuous(Range<Unit>),
-}
-
-impl<'a, Font, XUnit> Axes<'a, Font, XUnit>
+impl<Text> Axes<Text>
 where
-    Font: AsRef<PietFont>,
+    Text: piet::Text,
 {
     /// We assume here that we are drawing in an area from (0, 0) to (size.width, size.height). Use
-    /// an affine transformation if you want to write somewhere else.
-    fn paint<RC: RenderContext>(&self, ctx: RC, size: Size) {
+    /// an affine transformation if you want to draw somewhere else.
+    pub fn paint(&self, ctx: impl RenderContext) {
         let axes_brush = Brush::from(self.axis_color);
         let text_brush = Brush::from(self.text_color);
         // x axis
@@ -121,6 +136,12 @@ where
                 label_pos += label_gap;
             }
         }
+    }
+
+    /// Get the amount that we will draw outside our draw area
+    pub fn insets(&self) -> Insets {
+        // TODO
+        Insets::ZERO
     }
 }
 

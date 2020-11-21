@@ -1,21 +1,23 @@
 use anyhow::Error;
 use druid::widget::{Align, Flex, Label, Painter, TextBox, ViewSwitcher};
 use druid::{
+    im::{vector, Vector},
     AppLauncher, BoxConstraints, Color, Data, Env, Event, EventCtx, LayoutCtx, Lens, LifeCycle,
     LifeCycleCtx, LocalizedString, PaintCtx, RenderContext, Size, UpdateCtx, Widget, WidgetExt,
     WindowDesc,
 };
 use druid_graphs::{BoxPlot, BoxPlotData, Histogram, HistogramData, PieChart, PieChartData};
-use im::{vector, Vector};
 
 const VERTICAL_WIDGET_SPACING: f64 = 20.0;
 const TEXT_BOX_WIDTH: f64 = 200.0;
-const WINDOW_TITLE: LocalizedString<HelloState> = LocalizedString::new("Hello World!");
+const WINDOW_TITLE: LocalizedString<HelloState> =
+    LocalizedString::new("Graphs of the MONICA dataset");
 
 #[derive(Debug, Clone, Data, Lens)]
 struct HelloState {
     active_tab_idx: usize,
     monica: MonicaData,
+    box_title: &'static str,
 }
 
 fn main() {
@@ -28,6 +30,7 @@ fn main() {
     let initial_state = HelloState {
         active_tab_idx: 0,
         monica: MonicaData::load().unwrap(),
+        box_title: "Systolic BP",
     };
 
     // start the application
@@ -72,9 +75,9 @@ fn make_background(idx: usize) -> Painter<HelloState> {
     Painter::new(move |ctx, data: &HelloState, env| {
         let bounds = ctx.size().to_rect();
         if data.active_tab_idx == idx {
-            ctx.fill(bounds, &Color::hlc(0.0, 20.0, 0.0));
-        } else {
             ctx.fill(bounds, &Color::hlc(0.0, 40.0, 0.0));
+        } else {
+            ctx.fill(bounds, &Color::hlc(0.0, 20.0, 0.0));
         }
     })
 }
@@ -84,8 +87,8 @@ struct HistogramLens;
 impl Lens<HelloState, HistogramData> for HistogramLens {
     fn with<V, F: FnOnce(&HistogramData) -> V>(&self, data: &HelloState, f: F) -> V {
         f(&HistogramData {
-            title: "Distribution of BMI".to_string(),
-            x_axis_label: "BMI".to_string(),
+            title: "Distribution of BMI".into(),
+            x_axis_label: "BMI".into(),
             x_axis: vector![
                 "10-15".into(),
                 "15-20".into(),
@@ -101,8 +104,8 @@ impl Lens<HelloState, HistogramData> for HistogramLens {
     }
     fn with_mut<V, F: FnOnce(&mut HistogramData) -> V>(&self, data: &mut HelloState, f: F) -> V {
         f(&mut HistogramData {
-            title: "Distribution of BMI".to_string(),
-            x_axis_label: "BMI".to_string(),
+            title: "Distribution of BMI".into(),
+            x_axis_label: "BMI".into(),
             x_axis: vector![
                 "10-15".into(),
                 "15-20".into(),
@@ -123,15 +126,15 @@ struct PieChartLens;
 impl Lens<HelloState, PieChartData> for PieChartLens {
     fn with<V, F: FnOnce(&PieChartData) -> V>(&self, data: &HelloState, f: F) -> V {
         f(&PieChartData {
-            title: "Gender".to_string(),
-            category_labels: vector!["Female".to_string(), "Male".to_string()],
+            title: "Gender".into(),
+            category_labels: vector!["Female".into(), "Male".into()],
             counts: data.monica.bucket_sex(),
         })
     }
     fn with_mut<V, F: FnOnce(&mut PieChartData) -> V>(&self, data: &mut HelloState, f: F) -> V {
         f(&mut PieChartData {
-            title: "Gender".to_string(),
-            category_labels: vector!["Female".to_string(), "Male".to_string()],
+            title: "Gender".into(),
+            category_labels: vector!["Female".into(), "Male".into()],
             counts: data.monica.bucket_sex(),
         })
     }
@@ -142,17 +145,17 @@ struct BoxPlotLens;
 impl Lens<HelloState, BoxPlotData> for BoxPlotLens {
     fn with<V, F: FnOnce(&BoxPlotData) -> V>(&self, data: &HelloState, f: F) -> V {
         f(&BoxPlotData {
-            title: "Systolic BP".to_string(),
-            y_axis_label: "Systolic BP".to_string(),
+            title: data.box_title.into(),
             data_points: data.monica.systm.clone(),
         })
     }
     fn with_mut<V, F: FnOnce(&mut BoxPlotData) -> V>(&self, data: &mut HelloState, f: F) -> V {
-        f(&mut BoxPlotData {
-            title: "Systolic BP".to_string(),
-            y_axis_label: "Systolic BP".to_string(),
+        // all updates are ignored for now.
+        let mut data_inner = BoxPlotData {
+            title: data.box_title.into(),
             data_points: data.monica.systm.clone(),
-        })
+        };
+        f(&mut data_inner)
     }
 }
 
@@ -160,19 +163,12 @@ impl Lens<HelloState, BoxPlotData> for BoxPlotLens {
 
 #[derive(Debug, Default, Clone, Data)]
 struct MonicaData {
-    #[data(same_fn = "Vector::ptr_eq")]
     sex: Vector<u8>,
-    #[data(same_fn = "Vector::ptr_eq")]
     marit: Vector<u8>,
-    #[data(same_fn = "Vector::ptr_eq")]
     edlevel: Vector<u8>,
-    #[data(same_fn = "Vector::ptr_eq")]
     age: Vector<u8>,
-    #[data(same_fn = "Vector::ptr_eq")]
     systm: Vector<f64>,
-    #[data(same_fn = "Vector::ptr_eq")]
     diastm: Vector<f64>,
-    #[data(same_fn = "Vector::ptr_eq")]
     bmi: Vector<f64>,
 }
 

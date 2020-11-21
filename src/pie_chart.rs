@@ -1,11 +1,11 @@
 use druid::{
+    im::Vector,
     kurbo::{Affine, CircleSegment, Line, Rect},
-    piet::{FontBuilder, PietTextLayout, Text, TextLayout, TextLayoutBuilder},
+    piet::{PietTextLayout, Text, TextLayout, TextLayoutBuilder},
     BoxConstraints, Color, Data, Env, Event, EventCtx, Insets, LayoutCtx, LifeCycle, LifeCycleCtx,
     PaintCtx, RenderContext, Size, UpdateCtx, Widget,
 };
-use im::Vector;
-use std::f64::consts::PI;
+use std::{f64::consts::PI, sync::Arc};
 
 use crate::{new_color, square};
 
@@ -14,10 +14,8 @@ const TEXT_HEIGHT: f64 = 12.0;
 
 #[derive(Debug, Clone, Data)]
 pub struct PieChartData {
-    pub title: String,
-    #[data(same_fn = "Vector::ptr_eq")]
-    pub category_labels: Vector<String>,
-    #[data(same_fn = "Vector::ptr_eq")]
+    pub title: Arc<str>,
+    pub category_labels: Vector<Arc<str>>,
     pub counts: Vector<usize>,
 }
 
@@ -74,30 +72,15 @@ impl Widget<PieChartData> for PieChart {
         let total: usize = data.counts.iter().copied().sum();
 
         // TODO: caching of both the format and the layout
-        let font = ctx
-            .text()
-            .new_font_by_name("DejaVuSans", TITLE_HEIGHT)
-            .build()
-            .unwrap();
-        let font_sm = ctx
-            .text()
-            .new_font_by_name("DejaVuSans", TEXT_HEIGHT)
-            .build()
-            .unwrap();
-
         // background & title
         ctx.fill(bounds, &bg_brush);
         let title_layout = ctx
             .text()
-            .new_text_layout(&font, &data.title)
+            .new_text_layout(data.title.clone())
             .build()
             .unwrap();
         let title_width = title_layout.width();
-        ctx.draw_text(
-            &title_layout,
-            ((size.width - title_width) * 0.5, 40.0),
-            &text_brush,
-        );
+        ctx.draw_text(&title_layout, ((size.width - title_width) * 0.5, 40.0));
 
         // Pie
         let pie_area = square(
@@ -130,11 +113,11 @@ impl Widget<PieChartData> for PieChart {
         let key_bounds = bounds.inset((-bounds.width() * 0.6, 0.0, 0.0, 0.0));
         let len = data.category_labels.len() as f64;
         let height = len * TEXT_HEIGHT + TITLE_HEIGHT + (len + 3.0) * KEY_MARGIN;
-        let title_layout = ctx.text().new_text_layout(&font, "Key").build().unwrap();
+        let title_layout = ctx.text().new_text_layout("Key").build().unwrap();
         self.key_layouts.clear();
         let mut max_label_len: f64 = 0.0;
-        for label in data.category_labels.iter() {
-            let layout = ctx.text().new_text_layout(&font_sm, label).build().unwrap();
+        for label in data.category_labels.iter().cloned() {
+            let layout = ctx.text().new_text_layout(label).build().unwrap();
             max_label_len = max_label_len.max(layout.width());
             self.key_layouts.push(layout);
         }
@@ -150,7 +133,6 @@ impl Widget<PieChartData> for PieChart {
                 key_bounds.x0 + (key_bounds.width() - title_layout.width()) * 0.5,
                 key_bounds.y0 + KEY_MARGIN + TITLE_HEIGHT,
             ),
-            &text_brush,
         );
         for (idx, label) in self.key_layouts.iter().enumerate() {
             let top_of_text = key_bounds.y0
@@ -173,7 +155,6 @@ impl Widget<PieChartData> for PieChart {
                     key_bounds.x0 + KEY_MARGIN + TEXT_HEIGHT + KEY_MARGIN,
                     top_of_text + TEXT_HEIGHT,
                 ),
-                &text_brush,
             );
         }
     }

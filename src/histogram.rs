@@ -1,32 +1,68 @@
 use druid::{
-    kurbo::{Affine, CircleSegment, Line, Rect},
-    piet::{FontBuilder, PietTextLayout, Text, TextLayout, TextLayoutBuilder},
-    BoxConstraints, Color, Data, Env, Event, EventCtx, Insets, LayoutCtx, LifeCycle, LifeCycleCtx,
+    im::Vector,
+    kurbo::{Affine, Line, Rect},
+    piet::{PietTextLayout, Text, TextLayout, TextLayoutBuilder},
+    BoxConstraints, Color, Data, Env, Event, EventCtx, LayoutCtx, LifeCycle, LifeCycleCtx,
     PaintCtx, RenderContext, Size, UpdateCtx, Widget,
 };
-use im::Vector;
-use std::f64::consts::PI;
+use itertools::izip;
+use std::sync::Arc;
 
-use crate::{axis_heuristic, GRAPH_INSETS};
+use crate::{axes::axis_heuristic, GRAPH_INSETS};
 
 /// A histogram of equal width categories
 #[derive(Debug, Clone, Data)]
 pub struct HistogramData {
-    pub title: String,
-    pub x_axis_label: String,
-    #[data(same_fn = "Vector::ptr_eq")]
-    pub x_axis: Vector<String>,
-    #[data(same_fn = "Vector::ptr_eq")]
+    pub title: Arc<str>,
+    pub x_axis_label: Arc<str>,
+    pub x_axis: Vector<Arc<str>>,
     pub counts: Vector<usize>,
 }
 
 pub struct Histogram {
     bar_spacing: f64,
+    // `None` encodes that the layout needs building.
+    title_layout: Option<PietTextLayout>,
+    x_label_layout: Option<PietTextLayout>,
+    x_axis_layouts: Option<Vec<PietTextLayout>>,
 }
 
 impl Histogram {
     pub fn new() -> Self {
-        Histogram { bar_spacing: 10.0 }
+        Histogram {
+            bar_spacing: 10.0,
+            title_layout: None,
+            x_label_layout: None,
+            x_axis_layouts: None,
+        }
+    }
+
+    fn rebuild(&mut self, ctx: &mut PaintCtx, data: &HistogramData) {
+        if self.title_layout.is_none() {
+            self.title_layout = Some(
+                ctx.text()
+                    .new_text_layout(data.title.clone())
+                    .build()
+                    .unwrap(),
+            );
+        }
+        if self.x_label_layout.is_none() {
+            self.x_label_layout = Some(
+                ctx.text()
+                    .new_text_layout(data.x_axis_label.clone())
+                    .build()
+                    .unwrap(),
+            );
+        }
+        if self.x_axis_layouts.is_none() {
+            self.x_axis_layouts = Some(
+                data.x_axis
+                    .iter()
+                    .cloned()
+                    .map(|label| ctx.text().new_text_layout(label).build().unwrap())
+                    .collect(),
+            );
+        }
     }
 }
 
@@ -49,6 +85,15 @@ impl Widget<HistogramData> for Histogram {
         data: &HistogramData,
         env: &Env,
     ) {
+        if !old_data.title.same(&data.title) {
+            self.title_layout = None;
+        }
+        if !old_data.x_axis_label.same(&data.x_axis_label) {
+            self.x_label_layout = None;
+        }
+        if !old_data.x_axis.same(&data.x_axis) {
+            self.x_axis_layouts = None;
+        }
     }
 
     fn layout(
@@ -58,10 +103,11 @@ impl Widget<HistogramData> for Histogram {
         data: &HistogramData,
         env: &Env,
     ) -> Size {
-        bc.constrain((f64::INFINITY, f64::INFINITY))
+        bc.max() // or costrain to some size.
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, data: &HistogramData, env: &Env) {
+        self.rebuild(ctx, data);
         let bg_brush = ctx.solid_brush(Color::hlc(0.0, 90.0, 0.0));
         let axes_brush = ctx.solid_brush(Color::hlc(0.0, 60.0, 0.0));
         let text_brush = ctx.solid_brush(Color::BLACK);
@@ -71,30 +117,12 @@ impl Widget<HistogramData> for Histogram {
         let graph_bounds = bounds.inset(GRAPH_INSETS);
         let max_data = *data.counts.iter().max().unwrap() as f64;
 
-        // TODO: caching of both the format and the layout
-        let font = ctx
-            .text()
-            .new_font_by_name("DejaVuSans", 20.0)
-            .build()
-            .unwrap();
-        let font_sm = ctx
-            .text()
-            .new_font_by_name("DejaVuSans", 12.0)
-            .build()
-            .unwrap();
-
         // background & title
         ctx.fill(bounds, &bg_brush);
-        let title_layout = ctx
-            .text()
-            .new_text_layout(&font, &data.title)
-            .build()
-            .unwrap();
-        let title_width = title_layout.width();
+        let title_width = self.title_layout.as_ref().unwrap().size().width;
         ctx.draw_text(
-            &title_layout,
-            ((size.width - title_width) * 0.5, 40.0),
-            &text_brush,
+            self.title_layout.as_ref().unwrap(),
+            ((size.width - title_width) * 0.5, 10.0),
         );
 
         // x axis
@@ -103,16 +131,10 @@ impl Widget<HistogramData> for Histogram {
             (graph_bounds.x1, graph_bounds.y1),
         );
         ctx.stroke(x_axis, &axes_brush, 2.0);
-        let x_label_layout = ctx
-            .text()
-            .new_text_layout(&font, &data.x_axis_label)
-            .build()
-            .unwrap();
-        let x_label_width = x_label_layout.width();
+        let x_label_width = self.x_label_layout.as_ref().unwrap().size().width;
         ctx.draw_text(
-            &x_label_layout,
-            ((size.width - x_label_width) * 0.5, size.height - 20.0),
-            &text_brush,
+            self.x_label_layout.as_ref().unwrap(),
+            ((size.width - x_label_width) * 0.5, size.height - 40.0),
         );
 
         // y axis
@@ -129,14 +151,13 @@ impl Widget<HistogramData> for Histogram {
                 let y_pos = graph_bounds.y1 - (label_pos / max_data) * graph_bounds.height();
                 let label_layout = ctx
                     .text()
-                    .new_text_layout(&font_sm, &label_pos.to_string())
+                    .new_text_layout(<Arc<str> as From<String>>::from(label_pos.to_string()))
                     .build()
                     .unwrap();
-                let label_width = label_layout.width();
+                let label_width = label_layout.size().width;
                 ctx.draw_text(
                     &label_layout,
-                    (graph_bounds.x0 - label_width - 5.0, y_pos + 6.0),
-                    &text_brush,
+                    (graph_bounds.x0 - label_width - 5.0, y_pos - 8.0),
                 );
                 label_pos += label_gap;
             }
@@ -161,12 +182,12 @@ impl Widget<HistogramData> for Histogram {
                 graph_bounds.x0 + self.bar_spacing,
                 graph_bounds.y0,
             )));
-            for (idx, (count, label)) in data
-                .counts
-                .iter()
-                .copied()
-                .zip(data.x_axis.iter())
-                .enumerate()
+            for (idx, (count, label, label_layout)) in izip!(
+                data.counts.iter().copied(),
+                data.x_axis.iter().cloned(),
+                self.x_axis_layouts.as_ref().unwrap()
+            )
+            .enumerate()
             {
                 let idx = idx as f64;
                 let start_x = width * idx / data_len;
@@ -181,13 +202,8 @@ impl Widget<HistogramData> for Histogram {
                 );
 
                 // data label
-                let label_layout = ctx.text().new_text_layout(&font_sm, label).build().unwrap();
-                let label_width = label_layout.width();
-                ctx.draw_text(
-                    &label_layout,
-                    (mid_x - label_width * 0.5, height + 20.0),
-                    &text_brush,
-                );
+                let label_width = label_layout.size().width;
+                ctx.draw_text(&label_layout, (mid_x - label_width * 0.5, height + 2.));
             }
         });
     }

@@ -1,14 +1,15 @@
 use druid::{
     im::Vector,
     kurbo::{Affine, Circle, CircleSegment, Line, Point, Rect},
-    piet::{self, Text, TextLayout as _, TextLayoutBuilder as _, TextStorage},
+    piet::{self, Text, TextLayout as _, TextLayoutBuilder as _},
+    text::TextStorage,
     BoxConstraints, Color, Data, Env, Event, EventCtx, Insets, LayoutCtx, LifeCycle, LifeCycleCtx,
     PaintCtx, RenderContext, Size, TextLayout, UpdateCtx, Widget,
 };
 use std::{f64::consts::PI, sync::Arc};
 
 use crate::{
-    axes::{axis_heuristic, PositionedLayout},
+    axes::{calc_next_tick, calc_tick_spacing, data_as_range, PositionedLayout, YScale},
     GRAPH_INSETS,
 };
 
@@ -19,23 +20,13 @@ pub struct BoxPlotData {
     pub data_points: Vector<f64>,
 }
 
-// When you continue: retain more state, especially but not solely text layout.
-
 #[derive(Clone)]
 pub struct BoxPlot {
     title_layout: TextLayout<Arc<str>>,
+    // retained sorted list of data points
+    sorted_data_points: Option<Vec<f64>>,
     // retained state for rendering the y axis.
-    y_axis: Option<YAxis>,
-}
-
-#[derive(Clone)]
-struct YAxis {
-    /// height of the axis in druid pixel units that we built for.
-    height: f64,
-    /// (min, max) in variable units
-    range: (f64, f64),
-    /// y axis value label layouts.
-    value_labels: Vec<PositionedLayout<Arc<str>>>,
+    y_scale: Option<YScale>,
 }
 
 impl BoxPlot {
@@ -45,88 +36,30 @@ impl BoxPlot {
         title_layout.set_text_size(20.);
         BoxPlot {
             title_layout,
-            y_axis: None,
+            sorted_data_points: None,
+            y_scale: None,
         }
     }
 
     /// Rebuild any parts of the retained state that need rebuilding.
     fn rebuild_as_needed(&mut self, ctx: &mut PaintCtx, data: &BoxPlotData, env: &Env) {
-        if self.y_axis.is_none()
-            || matches!(self.y_axis, Some(YAxis { height, ..}) if height != ctx.size().height)
+        if self.sorted_data_points.is_none() {
+            let mut dp: Vec<f64> = data.data_points.iter().copied().collect();
+            dp.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            self.sorted_data_points = Some(dp);
+        }
+        if self.y_scale.is_none()
+            || matches!(self.y_scale.as_ref(), Some(scale) if scale.height() != ctx.size().height)
         {
-            self.y_axis = Some(self.build_y_axis(ctx, data, env));
-        }
-    }
-
-    fn build_y_axis(&mut self, ctx: &mut PaintCtx, data: &BoxPlotData, env: &Env) -> YAxis {
-        fn label_position(layout: &Layout, graph_bounds: Rect, label_ratio: f64) -> Point {
-            Point::new(
-                graph_bounds.x0 - layout.size().width - 5.,
-                graph_bounds.y1 - label_ratio * graph_bounds.height() - layout.size().height * 0.5,
-            )
-        }
-        let graph_bounds = self.graph_bounds(ctx.size());
-        let height = graph_bounds.height();
-        let range = y_axis_range(&data.data_points);
-        if range.0 < 0. || !range.0.is_finite() || !range.1.is_finite() {
-            todo!("negative data not yet supported");
-        }
-        // for now space labels a minimum of 40 pixels apart.
-        let max_num_points = (graph_bounds.height() / 40.0).floor() as usize + 1;
-        let mut value_labels = vec![];
-        match max_num_points {
-            0 => unreachable!(),
-            1 => {
-                let layout = self.new_y_label(0., ctx);
-                value_labels.push(PositionedLayout {
-                    position: Point::new(
-                        graph_bounds.x0 - layout.size().width - 5.,
-                        graph_bounds.y1 - layout.size().height * 0.5,
-                    ),
-                    layout,
-                });
-            }
-            max_num_points => {
-                let label_gap = axis_heuristic(range.1, max_num_points);
-                debug_assert!(label_gap > 0.);
-                let mut label_val = 0.;
-                while label_val <= range.1 {
-                    let mut layout = self.new_y_label(label_val, ctx);
-                    layout.rebuild_if_needed(ctx.text(), env);
-                    value_labels.push(PositionedLayout {
-                        position: Point::new(
-                            graph_bounds.x0 - layout.size().width - 5.,
-                            graph_bounds.y1
-                                - label_val / range.1 * graph_bounds.height()
-                                - layout.size().height * 0.5,
-                        ),
-                        layout,
-                    });
-                    label_val += label_gap;
-                }
-            }
-        }
-        YAxis {
-            height,
-            range,
-            value_labels,
+            self.y_scale = Some(YScale::new(
+                data_as_range(self.sorted_data_points.as_ref().unwrap().iter().copied()),
+                self.graph_bounds(ctx.size()),
+            ));
         }
     }
 
     pub fn graph_bounds(&self, size: Size) -> Rect {
         size.to_rect().inset(GRAPH_INSETS)
-    }
-
-    fn new_y_label(&self, scale_val: f64, ctx: &mut PaintCtx) -> TextLayout<Arc<str>> {
-        let scale_val = if scale_val < 1_000. && scale_val > 0.0001 || scale_val == 0. {
-            scale_val.to_string()
-        } else {
-            format!("{:e}", scale_val)
-        };
-        let text_storage: Arc<str> = scale_val.into();
-        let mut layout = TextLayout::from_text(text_storage);
-        layout.set_text_color(Color::BLACK);
-        layout
     }
 }
 
@@ -156,8 +89,15 @@ impl Widget<BoxPlotData> for BoxPlot {
         env: &Env,
     ) {
         if !Data::same(&old_data.title, &data.title) {
+            // relaying out the text is potentially expensive, so worth an equality check.
             if old_data.title != data.title {
                 self.title_layout.set_text(data.title.clone());
+            }
+        }
+        if !Data::same(&old_data.data_points, &data.data_points) {
+            if old_data.data_points != data.data_points {
+                self.sorted_data_points = None;
+                self.y_scale = None;
             }
         }
     }
@@ -173,14 +113,14 @@ impl Widget<BoxPlotData> for BoxPlot {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, data: &BoxPlotData, env: &Env) {
-        let graph_bounds = self.graph_bounds(ctx.size());
         self.rebuild_as_needed(ctx, data, env);
+        let size = ctx.size();
+        let bounds = size.to_rect();
+        let graph_bounds = self.graph_bounds(size);
         let bg_brush = ctx.solid_brush(Color::hlc(0.0, 90.0, 0.0));
         let axes_brush = ctx.solid_brush(Color::hlc(0.0, 60.0, 0.0));
         let text_brush = ctx.solid_brush(Color::BLACK);
         let bar_brush = ctx.solid_brush(Color::hlc(0.0, 50.0, 50.0));
-        let size = ctx.size();
-        let bounds = size.to_rect();
 
         // data stats
         let mut data_points = data.data_points.clone();
@@ -201,24 +141,13 @@ impl Widget<BoxPlotData> for BoxPlot {
         self.title_layout
             .draw(ctx, ((size.width - title_size.width) * 0.5, 40.0));
 
-        let datum_to_height =
-            |datum: f64| -> f64 { graph_bounds.y1 - (datum / data_max * graph_bounds.height()) };
+        let datum_to_height = |datum: f64| -> f64 {
+            let t = (datum - data_min) / (data_max - data_min);
+            graph_bounds.y1 - t * graph_bounds.height()
+        };
 
         // y axis
-        {
-            if graph_bounds.height() <= 0. {
-                // don't render the axis if there isn't any space
-                return;
-            }
-            let y_axis = Line::new(
-                (graph_bounds.x0, graph_bounds.y0),
-                (graph_bounds.x0, graph_bounds.y1),
-            );
-            ctx.stroke(y_axis, &axes_brush, 2.0);
-            for value_label in self.y_axis.as_mut().unwrap().value_labels.iter_mut() {
-                value_label.draw(ctx, env);
-            }
-        }
+        self.y_scale.as_mut().unwrap().draw(ctx, env);
 
         // data
         const PLOT_WIDTH: f64 = 32.0;
@@ -304,24 +233,4 @@ fn quantile(data: &Vector<f64>, p: f64) -> f64 {
     let x_kp1 = data.iter().copied().nth(k + 1).unwrap();
     let alpha = p * np1 - k as f64;
     x_k + alpha * (x_kp1 - x_k)
-}
-
-/// Returns (min, max) of the vector.
-///
-/// NaNs are propogated.
-fn y_axis_range(data: &Vector<f64>) -> (f64, f64) {
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    for v in data.iter().copied() {
-        if v.is_nan() {
-            return (f64::NAN, f64::NAN);
-        }
-        if v < min {
-            min = v;
-        }
-        if v > max {
-            max = v;
-        }
-    }
-    (min, max)
 }

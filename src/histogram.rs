@@ -8,7 +8,7 @@ use druid::{
 use itertools::izip;
 use std::sync::Arc;
 
-use crate::{axes::axis_heuristic, GRAPH_INSETS};
+use crate::{axes::calc_tick_spacing, GRAPH_INSETS};
 
 /// A histogram of equal width categories
 #[derive(Debug, Clone, Data)]
@@ -144,8 +144,10 @@ impl Widget<HistogramData> for Histogram {
                 (graph_bounds.x0, graph_bounds.y1 + 1.0),
             );
             ctx.stroke(y_axis, &axes_brush, 2.0);
-            let label_gap =
-                axis_heuristic(max_data, (graph_bounds.height() / 40.0).floor() as usize);
+            let label_gap = calc_tick_spacing(
+                (0., max_data).into(),
+                (graph_bounds.height() / 40.0).floor(),
+            );
             let mut label_pos = 0.0;
             while label_pos < max_data {
                 let y_pos = graph_bounds.y1 - (label_pos / max_data) * graph_bounds.height();

@@ -59,7 +59,7 @@ fn build_root_widget() -> impl Widget<HelloState> {
         |state: &HelloState, _env| state.active_tab_idx,
         move |tab_idx, state, env| match tab_idx {
             0 => Histogram::new().lens(HistogramLens).boxed(),
-            1 => BoxPlot::new().lens(BoxPlotLens).boxed(),
+            1 => BoxPlot::new().lens(BoxPlotLens).fix_width(300.).boxed(),
             2 => PieChart::new().lens(PieChartLens).boxed(),
             _ => unreachable!(),
         },

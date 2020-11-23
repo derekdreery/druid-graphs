@@ -7,10 +7,14 @@ mod histogram;
 //mod parts;
 mod axes;
 mod pie_chart;
+mod range;
 
-pub use box_plot::*;
-pub use histogram::{Histogram, HistogramData};
-pub use pie_chart::{PieChart, PieChartData};
+pub use crate::{
+    box_plot::*,
+    histogram::{Histogram, HistogramData},
+    pie_chart::{PieChart, PieChartData},
+    range::Range,
+};
 
 const GRAPH_INSETS: Insets = Insets::new(-40.0, -100.0, -40.0, -60.0);
 

@@ -1,77 +1,136 @@
+use crate::Range;
 use druid::{
     im::{vector, Vector},
-    kurbo::Point,
-    text::TextStorage,
-    Env, PaintCtx, TextLayout,
+    kurbo::{Line, Point, Rect},
+    text::{ArcStr, TextStorage},
+    Color, Env, PaintCtx, RenderContext, TextLayout,
 };
 use std::{convert::TryInto, sync::Arc};
 
-/// For now assume start at 0. Returns gap between each mark, in terms of the y variable.
-///
-/// `max_value` is the maximum value that will be graphed, and `target_count` is the maximum number
-/// of increments of the y axis scale we want.
-pub fn axis_heuristic(max_value: f64, target_count: usize) -> f64 {
-    if target_count <= 1 {
-        // nothing will be drawn apart from 0.
-        return f64::NAN;
-    }
-    assert!(max_value > 0., "{} > 0", max_value);
-    if target_count == 2 {
-        // if there are only 2 scale labels, use the min and max value
-        return max_value;
-    }
-    let target_count = target_count as f64;
-    let ideal_scale = max_value / target_count;
-    // Find the smalles power of 10 that, if used, would give > the required count of scale
-    // labels.
-    let mut log_too_many_tens_scale = ideal_scale.log10().floor() as i32;
-    let too_many_tens_scale = 10.0f64.powi(log_too_many_tens_scale);
-    // check that the next power of 10 would be ok
-    debug_assert!(
-        max_value / too_many_tens_scale > target_count,
-        "{} > {}",
-        max_value / too_many_tens_scale,
-        target_count
-    );
-    debug_assert!(
-        max_value / (too_many_tens_scale * 10.) <= target_count,
-        "{} <= {}",
-        max_value / (too_many_tens_scale * 10.),
-        target_count
-    );
-    // try 2 * our power of 10 that gives too many
-    if max_value / (2. * too_many_tens_scale) <= target_count {
-        return 2. * too_many_tens_scale;
-    }
-    // next try 5 * our power of 10 that gives too many
-    if max_value / (5. * too_many_tens_scale) <= target_count {
-        return 5. * too_many_tens_scale;
-    }
-    // then it must be the next power of 10
-    too_many_tens_scale * 10.
-}
+const SCALE_TICK_MARGIN: f64 = 5.;
 
 /// A struct for retaining text layout information for a y axis scale.
-pub struct YAxisScale {
-    /// (min, max)
-    range: (f64, f64),
-    scale: Vector<f64>,
-    layouts: Option<Vec<TextLayout<Arc<str>>>>,
+///
+/// [matplotlib ticker](https://github.com/matplotlib/matplotlib/blob/master/lib/matplotlib/ticker.py#L2057)
+/// is a good resource.
+#[derive(Clone)]
+pub struct YScale {
+    /// (min, max) the range of the data we are graphing. Can overspill if you want gaps at the
+    /// top/bottom, or include 0 if you want.
+    data_range: Range,
+    /// The graph area
+    graph_area: Rect,
+    /// Text color
+    text_color: Color,
+    /// Axis/mark color
+    axis_color: Color,
+    // retained
+    /// Our computed scale. The length is the computed number of scale ticks we should show. Format
+    /// is `(data value, y-coordinate of the tick)`
+    scale_ticker: Option<Ticker>,
+    /// Our computed text layouts for the tick labels.
+    layouts: Option<Vec<PositionedLayout<Arc<str>>>>,
 }
 
-impl YAxisScale {
-    pub fn new(max_value: f64) -> Self {
-        YAxisScale {
-            range: (0., max_value),
-            scale: vector![],
+impl YScale {
+    /// Create a new scale object.
+    ///
+    ///  - `data_range` is the range of the data, from lowest to highest.
+    ///  - `graph_area` is the rectangle where the graph will be drawn. We will draw outside this
+    ///    area a bit.
+    pub fn new(data_range: impl Into<Range>, graph_area: Rect) -> Self {
+        YScale {
+            data_range: data_range.into(),
+            graph_area: graph_area.abs(),
+            text_color: Color::BLACK,
+            axis_color: Color::grey(0.5),
+            scale_ticker: None,
             layouts: None,
+        }
+    }
+
+    /// Helper function to make sure the range includes 0.
+    pub fn include_zero(&mut self) {
+        if self.data_range.extend_to(0.) {
+            self.invalidate();
+        }
+    }
+
+    /// The height of the axis.
+    pub fn height(&self) -> f64 {
+        self.graph_area.height()
+    }
+
+    /// Rebuild the retained state, as needed.
+    pub fn build(&mut self, ctx: &mut PaintCtx, env: &Env) {
+        if self.scale_ticker.is_none() {
+            self.layouts = None;
+            self.scale_ticker = Some(Ticker::new(
+                self.data_range,
+                (self.graph_area.height() / 40.).floor() as usize,
+            ));
+        }
+        if self.layouts.is_none() {
+            self.layouts = Some(
+                self.scale_ticker
+                    .unwrap()
+                    .into_iter()
+                    .map(|tick| {
+                        let mut layout =
+                            TextLayout::from_text(ArcStr::from(tick.value.to_string()));
+                        layout.set_text_color(self.text_color.clone());
+                        layout.rebuild_if_needed(ctx.text(), env);
+                        let size = layout.size();
+                        let y_pos = self.graph_area.y1 - tick.t * self.graph_area.height();
+                        PositionedLayout {
+                            position: Point::new(
+                                self.graph_area.x0 - size.width - SCALE_TICK_MARGIN,
+                                y_pos - 0.5 * size.height,
+                            ),
+                            layout,
+                        }
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    pub fn set_text_color(&mut self, color: Color) {
+        self.text_color = color.clone();
+        if let Some(layouts) = self.layouts.as_mut() {
+            for playout in layouts {
+                playout.layout.set_text_color(color.clone());
+            }
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.scale_ticker = None;
+        self.layouts = None;
+    }
+
+    pub fn draw(&mut self, ctx: &mut PaintCtx, env: &Env) {
+        self.build(ctx, env);
+        // draw axis
+        let axis_brush = ctx.solid_brush(self.axis_color.clone());
+        ctx.stroke(
+            Line::new(
+                (self.graph_area.x0, self.graph_area.y0),
+                (self.graph_area.x0, self.graph_area.y1),
+            ),
+            &axis_brush,
+            1.,
+        );
+        // draw tick labels
+        for layout in self.layouts.as_mut().unwrap().iter_mut() {
+            layout.draw(ctx, env);
         }
     }
 }
 
 #[derive(Clone)]
 pub struct PositionedLayout<T> {
-    /// The centre of the label, as a percentage from bottom to top.
+    /// The position that the layout should be displayed.
     pub position: Point,
     pub layout: TextLayout<T>,
 }
@@ -81,4 +140,222 @@ impl<T: TextStorage> PositionedLayout<T> {
         self.layout.rebuild_if_needed(ctx.text(), env);
         self.layout.draw(ctx, self.position)
     }
+}
+
+/// Able to return a sequence of locations along an axis where ticks should be displayed, and the
+/// values that should be displayed there.
+#[derive(Debug, Copy, Clone)]
+pub struct Ticker {
+    data_range: Range,
+    target_num_points: usize,
+    // calculated
+    spacing: f64,
+}
+
+impl Ticker {
+    pub fn new(data_range: Range, target_num_points: usize) -> Self {
+        let spacing = calc_tick_spacing(data_range, target_num_points as f64);
+        Self {
+            data_range,
+            target_num_points,
+            spacing,
+        }
+    }
+
+    fn first_tick(&self) -> f64 {
+        match self.target_num_points {
+            0 | 1 | 2 => self.data_range.min(),
+            n => calc_next_tick(self.data_range.min(), self.spacing),
+        }
+    }
+}
+
+impl IntoIterator for Ticker {
+    type IntoIter = TickerIter;
+    type Item = Tick;
+
+    fn into_iter(self) -> Self::IntoIter {
+        TickerIter {
+            inner: self,
+            next_tick: 0,
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq)]
+/// The position at which a tick should be drawn.
+pub struct Tick {
+    /// The distance along the axis that the value should be displayed at.
+    pub t: f64,
+    /// the value that should be displayed.
+    pub value: f64,
+}
+
+impl Tick {
+    pub fn new(t: f64, value: f64) -> Self {
+        Self { t, value }
+    }
+}
+
+pub struct TickerIter {
+    inner: Ticker,
+    next_tick: usize,
+}
+
+impl Iterator for TickerIter {
+    type Item = Tick;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.inner.target_num_points {
+            0 => None,
+            1 => match self.next_tick {
+                0 => {
+                    self.next_tick += 1;
+                    Some(Tick::new(0., self.inner.data_range.min()))
+                }
+                _ => None,
+            },
+            2 => match self.next_tick {
+                0 => {
+                    self.next_tick += 1;
+                    Some(Tick::new(0., self.inner.data_range.min()))
+                }
+                1 => {
+                    self.next_tick += 1;
+                    Some(Tick::new(1., self.inner.data_range.max()))
+                }
+                _ => None,
+            },
+            n => {
+                let value = self.inner.first_tick() + (self.next_tick as f64) * self.inner.spacing;
+                let (min, max) = self.inner.data_range.into();
+                let t = (value - min) / (max - min);
+                if t <= 1. {
+                    self.next_tick += 1;
+                    Some(Tick::new(t, value))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Returns gap between each scale tick, in terms of the y variable, that gives closest to the
+/// requested `target_count` and is either 1, 2 or 5 ×10<sup>n</sup> for some n (hardcoded for now).
+///
+/// `max_value` is the maximum value that will be graphed, and `target_count` is the maximum number
+/// of increments of the y axis scale we want.
+pub fn calc_tick_spacing(range: Range, target_count: f64) -> f64 {
+    if target_count < 1. {
+        // We don't support a number of ticks less than 1.
+        return f64::NAN;
+    }
+    let too_many_10s = pow_10_just_too_many(range, target_count);
+    // try 2 * our power of 10 that gives too many
+    if count_ticks(range, 2. * too_many_10s) <= target_count {
+        return 2. * too_many_10s;
+    }
+    // next try 5 * our power of 10 that gives too many
+    if count_ticks(range, 5. * too_many_10s) <= target_count {
+        return 5. * too_many_10s;
+    }
+    // then it must be the next power of 10
+    too_many_10s * 10.
+}
+
+/// Find a value of type 10<sup>x</sup> where x is an integer, such that ticks at that distance
+/// would result in too many ticks, but ticks at 10<sup>x+1</sup> would give too few (or just
+/// right). Returns spacing of ticks
+fn pow_10_just_too_many(range: Range, num_ticks: f64) -> f64 {
+    // -1 for fence/fence post
+    let num_ticks = num_ticks - 1.;
+    let ideal_spacing = range.size() / num_ticks;
+    let spacing = (10.0f64).powf(ideal_spacing.log10().floor());
+    // The actual value where the first tick will go (we need to work out if we lose too much space
+    // at the ends and we end up being too few instead of too many)
+    let first_tick = calc_next_tick(range.min(), spacing);
+    // If when taking account of the above we still have too many ticks
+    if first_tick + num_ticks * (spacing + 1.) < calc_prev_tick(range.max(), spacing) {
+        // then just return
+        spacing
+    } else {
+        // else go to the next smaller power of 10
+        spacing * 0.1
+    }
+}
+
+/// Get the location of the first tick of the given spacing after the value.
+#[inline]
+pub fn calc_next_tick(v: f64, spacing: f64) -> f64 {
+    // `prev tick <-> v`
+    let v_tick_diff = v.rem_euclid(spacing);
+    if v_tick_diff == 0. {
+        v
+    } else {
+        v - v_tick_diff + spacing
+    }
+}
+
+/// Get the location of the first tick of the given spacing before the value.
+#[inline]
+pub fn calc_prev_tick(v: f64, spacing: f64) -> f64 {
+    // `prev tick <-> v`
+    let v_tick_diff = v.rem_euclid(spacing);
+    v - v_tick_diff
+}
+
+/// Count the number of ticks between min and max using the given step
+#[inline]
+fn count_ticks(range: Range, tick_step: f64) -> f64 {
+    let start = calc_next_tick(range.min(), tick_step);
+    let end = calc_prev_tick(range.max(), tick_step);
+    ((end - start) / tick_step + 1.).floor() // fence/fencepost
+}
+
+#[test]
+fn text_pow_10_just_too_many() {
+    for (min, max, num_ticks) in vec![
+        (0., 100., 10.),
+        (-9., 109., 10.),
+        (-9., 99., 10.),
+        (1., 10., 1.),
+    ] {
+        let range = Range::new(min, max);
+        let step = pow_10_just_too_many(range, num_ticks);
+        assert!(
+            count_ticks(range, step) > num_ticks,
+            "count_ticks({:?}, {}) > {}",
+            range,
+            step,
+            num_ticks
+        );
+        assert!(
+            count_ticks(range, step * 10.) <= num_ticks,
+            "count_ticks({??}, {}) <= {}",
+            range,
+            step * 10.,
+            num_ticks
+        );
+    }
+}
+
+/// Returns (min, max) of the vector.
+///
+/// NaNs are propogated.
+pub fn data_as_range(mut data: impl Iterator<Item = f64>) -> Range {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for v in data {
+        if v.is_nan() {
+            return (f64::NAN, f64::NAN).into();
+        }
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+    }
+    (min, max).into()
 }

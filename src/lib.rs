@@ -1,19 +1,21 @@
 //! Some graph widgets for use with druid
 use druid::{kurbo::Rect, Color, Insets};
-use std::convert::TryInto;
 
+mod axes;
 mod box_plot;
 mod histogram;
-//mod parts;
-mod axes;
+mod line_chart;
 mod pie_chart;
 mod range;
+pub mod theme;
 
 pub use crate::{
-    box_plot::*,
+    box_plot::{BoxPlot, BoxPlotData},
     histogram::{Histogram, HistogramData},
+    line_chart::{LineChart, LineChartData},
     pie_chart::{PieChart, PieChartData},
     range::Range,
+    theme::add_to_env,
 };
 
 const GRAPH_INSETS: Insets = Insets::new(-40.0, -100.0, -40.0, -60.0);

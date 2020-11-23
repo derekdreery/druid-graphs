@@ -1,32 +1,53 @@
 use druid::{
     im::Vector,
     kurbo::{Affine, CircleSegment, Line, Rect},
-    piet::{PietTextLayout, Text, TextLayout, TextLayoutBuilder},
-    BoxConstraints, Color, Data, Env, Event, EventCtx, Insets, LayoutCtx, LifeCycle, LifeCycleCtx,
-    PaintCtx, RenderContext, Size, UpdateCtx, Widget,
+    piet::{PietTextLayout, Text, TextLayoutBuilder},
+    theme::LABEL_COLOR,
+    ArcStr, BoxConstraints, Color, Data, Env, Event, EventCtx, Insets, KeyOrValue, LayoutCtx,
+    LifeCycle, LifeCycleCtx, PaintCtx, RenderContext, Size, TextLayout, UpdateCtx, Widget,
 };
-use std::{f64::consts::PI, sync::Arc};
+use itertools::izip;
+use std::{cmp::Ordering, f64::consts::PI, iter};
 
-use crate::{new_color, square};
-
-const TITLE_HEIGHT: f64 = 20.0;
-const TEXT_HEIGHT: f64 = 12.0;
+use crate::{new_color, square, theme};
 
 #[derive(Debug, Clone, Data)]
 pub struct PieChartData {
-    pub title: Arc<str>,
-    pub category_labels: Vector<Arc<str>>,
+    pub title: ArcStr,
+    pub category_labels: Vector<ArcStr>,
     pub counts: Vector<usize>,
 }
 
+#[derive(Clone)]
 pub struct PieChart {
-    key_layouts: Vec<PietTextLayout>,
+    title_layout: TextLayout<ArcStr>,
+    key_title_layout: TextLayout<ArcStr>,
+    category_layouts: Vec<TextLayout<ArcStr>>,
+    // theme stuff
+    key_stroke_color: KeyOrValue<Color>,
+    key_margin: KeyOrValue<f64>,
 }
 
 impl PieChart {
     pub fn new() -> Self {
+        let mut key_title_layout = TextLayout::from_text("Key");
+        key_title_layout.set_text_size(20.);
+        let mut title_layout = TextLayout::new();
+        title_layout.set_text_size(20.);
         PieChart {
-            key_layouts: vec![],
+            title_layout,
+            key_title_layout,
+            category_layouts: vec![],
+            key_stroke_color: LABEL_COLOR.into(),
+            key_margin: theme::MARGIN.into(),
+        }
+    }
+
+    pub fn rebuild_if_needed(&mut self, ctx: &mut PaintCtx, env: &Env) {
+        self.title_layout.rebuild_if_needed(ctx.text(), env);
+        self.key_title_layout.rebuild_if_needed(ctx.text(), env);
+        for layout in self.category_layouts.iter_mut() {
+            layout.rebuild_if_needed(ctx.text(), env);
         }
     }
 }
@@ -41,6 +62,18 @@ impl Widget<PieChartData> for PieChart {
         data: &PieChartData,
         env: &Env,
     ) {
+        match event {
+            LifeCycle::WidgetAdded => {
+                self.title_layout.set_text(data.title.clone());
+                self.category_layouts = data
+                    .category_labels
+                    .iter()
+                    .cloned()
+                    .map(|text| TextLayout::from_text(text))
+                    .collect()
+            }
+            _ => (),
+        }
     }
 
     fn update(
@@ -50,6 +83,29 @@ impl Widget<PieChartData> for PieChart {
         data: &PieChartData,
         env: &Env,
     ) {
+        if !Data::same(&old_data.title, &data.title) {
+            self.title_layout.set_text(data.title.clone());
+        }
+        self.title_layout.needs_rebuild_after_update(ctx);
+        self.key_title_layout.needs_rebuild_after_update(ctx);
+        if !Data::same(&old_data.category_labels, &data.category_labels) {
+            // If we don't have enough labels add some on the end.
+            //
+            // Note that we might have too many. That is why we only take the first
+            // `category_labels.len()` items during paint.
+            if self.category_layouts.len() < data.category_labels.len() {
+                self.category_layouts.extend(
+                    iter::repeat(TextLayout::new())
+                        .take(data.category_labels.len() - self.category_layouts.len()),
+                );
+            }
+            for (label_text, layout) in izip!(&data.category_labels, &mut self.category_layouts) {
+                layout.set_text(label_text.clone());
+            }
+        }
+        for layout in self.category_layouts.iter_mut() {
+            layout.needs_rebuild_after_update(ctx);
+        }
     }
 
     fn layout(
@@ -63,24 +119,20 @@ impl Widget<PieChartData> for PieChart {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, data: &PieChartData, env: &Env) {
+        self.rebuild_if_needed(ctx, env);
         let bg_brush = ctx.solid_brush(Color::hlc(0.0, 90.0, 0.0));
         let axes_brush = ctx.solid_brush(Color::hlc(0.0, 60.0, 0.0));
-        let text_brush = ctx.solid_brush(Color::BLACK);
+        let text_brush = ctx.solid_brush(self.key_stroke_color.resolve(env));
         let bar_brush = ctx.solid_brush(Color::hlc(0.0, 50.0, 50.0));
         let size = ctx.size();
         let bounds = size.to_rect();
         let total: usize = data.counts.iter().copied().sum();
+        let categories_count = data.category_labels.len();
 
-        // TODO: caching of both the format and the layout
         // background & title
-        ctx.fill(bounds, &bg_brush);
-        let title_layout = ctx
-            .text()
-            .new_text_layout(data.title.clone())
-            .build()
-            .unwrap();
-        let title_width = title_layout.width();
-        ctx.draw_text(&title_layout, ((size.width - title_width) * 0.5, 40.0));
+        let title_width = self.title_layout.size().width;
+        self.title_layout
+            .draw(ctx, ((size.width - title_width) * 0.5, 40.0));
 
         // Pie
         let pie_area = square(
@@ -107,55 +159,63 @@ impl Widget<PieChartData> for PieChart {
         }
 
         // Key
-        const KEY_MARGIN: f64 = 6.0;
         const COLOR_SIZE: f64 = 12.0;
         // last 40% of the width
         let key_bounds = bounds.inset((-bounds.width() * 0.6, 0.0, 0.0, 0.0));
-        let len = data.category_labels.len() as f64;
-        let height = len * TEXT_HEIGHT + TITLE_HEIGHT + (len + 3.0) * KEY_MARGIN;
-        let title_layout = ctx.text().new_text_layout("Key").build().unwrap();
-        self.key_layouts.clear();
-        let mut max_label_len: f64 = 0.0;
-        for label in data.category_labels.iter().cloned() {
-            let layout = ctx.text().new_text_layout(label).build().unwrap();
-            max_label_len = max_label_len.max(layout.width());
-            self.key_layouts.push(layout);
+        // Calculate some stuff about label text layout:
+        let key_margin = self.key_margin.resolve(env);
+        let mut max_color_label_width = 0.;
+        let mut total_label_height = 0.;
+        for layout in self.category_layouts.iter().take(categories_count) {
+            let size = layout.size();
+            let new_width = size.width + size.height + 3. * key_margin; // m color m label m
+            if new_width > max_color_label_width {
+                max_color_label_width = new_width;
+            }
+            total_label_height += size.height;
         }
+        let height = total_label_height
+            + self.key_title_layout.size().height
+            + (categories_count as f64 + 2.0) * key_margin;
 
-        let key_width = (title_layout.width() + 2.0 * KEY_MARGIN)
-            .max(max_label_len + 3.0 * KEY_MARGIN + COLOR_SIZE);
+        let key_width =
+            (self.key_title_layout.size().width + 2.0 * key_margin).max(max_color_label_width);
 
         let key_bounds = Rect::from_center_size(key_bounds.center(), (key_width, height));
         ctx.stroke(key_bounds, &text_brush, 2.0);
-        ctx.draw_text(
-            &title_layout,
+        self.key_title_layout.draw(
+            ctx,
             (
-                key_bounds.x0 + (key_bounds.width() - title_layout.width()) * 0.5,
-                key_bounds.y0 + KEY_MARGIN + TITLE_HEIGHT,
+                key_bounds.x0 + (key_bounds.width() - self.key_title_layout.size().width) * 0.5,
+                key_bounds.y0 + key_margin,
             ),
         );
-        for (idx, label) in self.key_layouts.iter().enumerate() {
-            let top_of_text = key_bounds.y0
-                + KEY_MARGIN
-                + TITLE_HEIGHT
-                + (2.0 * KEY_MARGIN)
-                + (TEXT_HEIGHT + KEY_MARGIN) * idx as f64;
+        let mut next_loc = key_bounds.y0 + key_margin * 2. + self.key_title_layout.size().height;
+        // important: only take the right amount of layouts here.
+        for (idx, layout) in self
+            .category_layouts
+            .iter()
+            .take(categories_count)
+            .enumerate()
+        {
+            let height = layout.size().height;
             let color_rect = Rect::new(
-                key_bounds.x0 + KEY_MARGIN,
-                top_of_text,
-                // use TEXT_HEIGHT to make the color square match the text.
-                key_bounds.x0 + KEY_MARGIN + TEXT_HEIGHT,
-                top_of_text + TEXT_HEIGHT,
+                key_bounds.x0 + key_margin,
+                next_loc,
+                // use the text's height to make the color square match the text.
+                key_bounds.x0 + key_margin + height,
+                next_loc + height,
             );
             ctx.fill(color_rect, &new_color(idx));
             ctx.stroke(color_rect, &text_brush, 1.0);
-            ctx.draw_text(
-                &label,
+            layout.draw(
+                ctx,
                 (
-                    key_bounds.x0 + KEY_MARGIN + TEXT_HEIGHT + KEY_MARGIN,
-                    top_of_text + TEXT_HEIGHT,
+                    key_bounds.x0 + key_margin + height + key_margin, // m color m label
+                    next_loc,
                 ),
             );
+            next_loc += key_margin + height;
         }
     }
 }

@@ -6,7 +6,10 @@ use druid::{
     LifeCycleCtx, LocalizedString, PaintCtx, RenderContext, Size, UpdateCtx, Widget, WidgetExt,
     WindowDesc,
 };
-use druid_graphs::{BoxPlot, BoxPlotData, Histogram, HistogramData, PieChart, PieChartData};
+use druid_graphs::{
+    BoxPlot, BoxPlotData, Histogram, HistogramData, LineChart, LineChartData, PieChart,
+    PieChartData,
+};
 
 const VERTICAL_WIDGET_SPACING: f64 = 20.0;
 const TEXT_BOX_WIDTH: f64 = 200.0;
@@ -35,12 +38,13 @@ fn main() {
 
     // start the application
     AppLauncher::with_window(main_window)
+        .configure_env(|env, _| druid_graphs::add_to_env(env))
         .launch(initial_state)
         .expect("Failed to launch application");
 }
 
 fn build_root_widget() -> impl Widget<HelloState> {
-    let tab_labels = ["Histogram", "Box Plot", "Pie Chart"];
+    let tab_labels = ["Histogram", "Box Plot", "Pie Chart", "Line Chart"];
 
     let mut tabs = Flex::row();
     for (idx, label) in tab_labels.iter().enumerate() {
@@ -61,6 +65,7 @@ fn build_root_widget() -> impl Widget<HelloState> {
             0 => Histogram::new().lens(HistogramLens).boxed(),
             1 => BoxPlot::new().lens(BoxPlotLens).fix_width(300.).boxed(),
             2 => PieChart::new().lens(PieChartLens).boxed(),
+            3 => LineChart::new().lens(LineChartLens).boxed(),
             _ => unreachable!(),
         },
     );
@@ -154,6 +159,29 @@ impl Lens<HelloState, BoxPlotData> for BoxPlotLens {
         let mut data_inner = BoxPlotData {
             title: data.box_title.into(),
             data_points: data.monica.systm.clone(),
+        };
+        f(&mut data_inner)
+    }
+}
+
+struct LineChartLens;
+
+impl Lens<HelloState, LineChartData> for LineChartLens {
+    fn with<V, F: FnOnce(&LineChartData) -> V>(&self, data: &HelloState, f: F) -> V {
+        f(&LineChartData {
+            title: "Blood Pressure".into(),
+            x_axis_label: None,
+            x_data: None,
+            y_data: data.monica.systm.clone(),
+        })
+    }
+    fn with_mut<V, F: FnOnce(&mut LineChartData) -> V>(&self, data: &mut HelloState, f: F) -> V {
+        // all updates are ignored for now.
+        let mut data_inner = LineChartData {
+            title: "Blood Pressure".into(),
+            x_axis_label: None,
+            x_data: None,
+            y_data: data.monica.systm.clone(),
         };
         f(&mut data_inner)
     }

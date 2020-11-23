@@ -63,6 +63,23 @@ impl Range {
             false
         }
     }
+
+    pub fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = f64>,
+    {
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for v in iter {
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
+        }
+        Range::new(min, max)
+    }
 }
 
 impl From<(f64, f64)> for Range {

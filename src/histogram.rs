@@ -1,68 +1,80 @@
 use druid::{
     im::Vector,
-    kurbo::{Affine, Line, Rect},
-    piet::{PietTextLayout, Text, TextLayout, TextLayoutBuilder},
-    BoxConstraints, Color, Data, Env, Event, EventCtx, LayoutCtx, LifeCycle, LifeCycleCtx,
-    PaintCtx, RenderContext, Size, UpdateCtx, Widget,
+    kurbo::{Affine, Line, Point, Rect},
+    ArcStr, BoxConstraints, Color, Data, Env, Event, EventCtx, KeyOrValue, LayoutCtx, LifeCycle,
+    LifeCycleCtx, PaintCtx, RenderContext, Size, TextLayout, UpdateCtx, Widget,
 };
 use itertools::izip;
 use std::sync::Arc;
 
-use crate::{axes::calc_tick_spacing, GRAPH_INSETS};
+use crate::{
+    axes::{calc_tick_spacing, Scale},
+    theme, GRAPH_INSETS,
+};
 
 /// A histogram of equal width categories
 #[derive(Debug, Clone, Data)]
 pub struct HistogramData {
-    pub title: Arc<str>,
-    pub x_axis_label: Arc<str>,
-    pub x_axis: Vector<Arc<str>>,
+    pub title: ArcStr,
+    pub x_axis_label: ArcStr,
+    pub x_axis: Vector<ArcStr>,
     pub counts: Vector<usize>,
 }
 
 pub struct Histogram {
-    bar_spacing: f64,
-    // `None` encodes that the layout needs building.
-    title_layout: Option<PietTextLayout>,
-    x_label_layout: Option<PietTextLayout>,
-    x_axis_layouts: Option<Vec<PietTextLayout>>,
+    bar_spacing: KeyOrValue<f64>,
+    axis_color: KeyOrValue<Color>,
+    // retained state
+    title_layout: TextLayout<ArcStr>,
+    x_label_layout: TextLayout<ArcStr>,
+    x_axis_layouts: Option<Vec<TextLayout<ArcStr>>>,
+    y_scale: Option<Scale>,
 }
 
 impl Histogram {
     pub fn new() -> Self {
+        let mut title_layout = TextLayout::new();
+        title_layout.set_text_size(20.);
         Histogram {
-            bar_spacing: 10.0,
-            title_layout: None,
-            x_label_layout: None,
+            bar_spacing: theme::BAR_SPACING.into(),
+            axis_color: theme::AXES_COLOR.into(),
+            title_layout,
+            x_label_layout: TextLayout::new(),
             x_axis_layouts: None,
+            y_scale: None,
         }
     }
 
-    fn rebuild(&mut self, ctx: &mut PaintCtx, data: &HistogramData) {
-        if self.title_layout.is_none() {
-            self.title_layout = Some(
-                ctx.text()
-                    .new_text_layout(data.title.clone())
-                    .build()
-                    .unwrap(),
-            );
-        }
-        if self.x_label_layout.is_none() {
-            self.x_label_layout = Some(
-                ctx.text()
-                    .new_text_layout(data.x_axis_label.clone())
-                    .build()
-                    .unwrap(),
-            );
-        }
+    fn rebuild_if_needed(&mut self, ctx: &mut PaintCtx, data: &HistogramData, env: &Env) {
+        self.title_layout.rebuild_if_needed(ctx.text(), env);
+        self.x_label_layout.rebuild_if_needed(ctx.text(), env);
         if self.x_axis_layouts.is_none() {
             self.x_axis_layouts = Some(
                 data.x_axis
                     .iter()
                     .cloned()
-                    .map(|label| ctx.text().new_text_layout(label).build().unwrap())
+                    .map(|label| {
+                        let mut layout = TextLayout::from_text(label);
+                        layout.rebuild_if_needed(ctx.text(), env);
+                        layout
+                    })
                     .collect(),
             );
         }
+        if self.y_scale.is_none() {
+            self.y_scale = Some(Scale::new_y((
+                0.,
+                data.counts.iter().copied().max().unwrap_or(0) as f64,
+            )))
+        }
+        let graph_bounds = self.graph_bounds(ctx.size());
+        let y_scale = self.y_scale.as_mut().unwrap();
+        y_scale.set_graph_bounds(graph_bounds);
+        y_scale.rebuild_if_needed(ctx, env);
+    }
+
+    fn graph_bounds(&self, size: Size) -> Rect {
+        Rect::from_origin_size(Point::ZERO, size).inset(GRAPH_INSETS)
     }
 }
 
@@ -76,6 +88,14 @@ impl Widget<HistogramData> for Histogram {
         data: &HistogramData,
         env: &Env,
     ) {
+        match event {
+            LifeCycle::WidgetAdded => {
+                self.title_layout.set_text(data.title.clone());
+                self.x_label_layout.set_text(data.x_axis_label.clone());
+                // TODO reuse x axis tick label layouts
+            }
+            _ => (),
+        }
     }
 
     fn update(
@@ -86,10 +106,10 @@ impl Widget<HistogramData> for Histogram {
         env: &Env,
     ) {
         if !old_data.title.same(&data.title) {
-            self.title_layout = None;
+            self.title_layout.set_text(data.title.clone());
         }
         if !old_data.x_axis_label.same(&data.x_axis_label) {
-            self.x_label_layout = None;
+            self.x_label_layout.set_text(data.x_axis_label.clone());
         }
         if !old_data.x_axis.same(&data.x_axis) {
             self.x_axis_layouts = None;
@@ -107,81 +127,30 @@ impl Widget<HistogramData> for Histogram {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, data: &HistogramData, env: &Env) {
-        self.rebuild(ctx, data);
+        self.rebuild_if_needed(ctx, data, env);
         let bg_brush = ctx.solid_brush(Color::hlc(0.0, 90.0, 0.0));
-        let axes_brush = ctx.solid_brush(Color::hlc(0.0, 60.0, 0.0));
-        let text_brush = ctx.solid_brush(Color::BLACK);
+        let axes_brush = ctx.solid_brush(self.axis_color.resolve(env));
         let bar_brush = ctx.solid_brush(Color::hlc(0.0, 50.0, 50.0));
         let size = ctx.size();
         let bounds = size.to_rect();
         let graph_bounds = bounds.inset(GRAPH_INSETS);
         let max_data = *data.counts.iter().max().unwrap() as f64;
-
-        // background & title
-        ctx.fill(bounds, &bg_brush);
-        let title_width = self.title_layout.as_ref().unwrap().size().width;
-        ctx.draw_text(
-            self.title_layout.as_ref().unwrap(),
-            ((size.width - title_width) * 0.5, 10.0),
-        );
-
-        // x axis
-        let x_axis = Line::new(
-            (graph_bounds.x0 - 1.0, graph_bounds.y1),
-            (graph_bounds.x1, graph_bounds.y1),
-        );
-        ctx.stroke(x_axis, &axes_brush, 2.0);
-        let x_label_width = self.x_label_layout.as_ref().unwrap().size().width;
-        ctx.draw_text(
-            self.x_label_layout.as_ref().unwrap(),
-            ((size.width - x_label_width) * 0.5, size.height - 40.0),
-        );
-
-        // y axis
-        {
-            let y_axis = Line::new(
-                (graph_bounds.x0, graph_bounds.y0),
-                (graph_bounds.x0, graph_bounds.y1 + 1.0),
-            );
-            ctx.stroke(y_axis, &axes_brush, 2.0);
-            let label_gap = calc_tick_spacing(
-                (0., max_data).into(),
-                (graph_bounds.height() / 40.0).floor(),
-            );
-            let mut label_pos = 0.0;
-            while label_pos < max_data {
-                let y_pos = graph_bounds.y1 - (label_pos / max_data) * graph_bounds.height();
-                let label_layout = ctx
-                    .text()
-                    .new_text_layout(<Arc<str> as From<String>>::from(label_pos.to_string()))
-                    .build()
-                    .unwrap();
-                let label_width = label_layout.size().width;
-                ctx.draw_text(
-                    &label_layout,
-                    (graph_bounds.x0 - label_width - 5.0, y_pos - 8.0),
-                );
-                label_pos += label_gap;
-            }
-        }
+        let bar_spacing = self.bar_spacing.resolve(env);
 
         // data
         let data_len = data.counts.len() as f64;
         let (width, height) = (graph_bounds.width(), graph_bounds.height());
-        let total_space = (data_len + 1.0) * self.bar_spacing;
+        let total_space = (data_len + 1.0) * bar_spacing;
         // give up if the area is too small.
         if total_space >= width {
             return;
         }
         let total_bar_width = width - total_space;
         let bar_width = total_bar_width / data_len;
-        assert_eq!(
-            bar_width * data_len + self.bar_spacing * (data_len + 1.0),
-            width
-        );
+        assert_eq!(bar_width * data_len + bar_spacing * (data_len + 1.0), width);
         ctx.with_save(|ctx| {
             ctx.transform(Affine::translate((
-                graph_bounds.x0 + self.bar_spacing,
+                graph_bounds.x0 + bar_spacing,
                 graph_bounds.y0,
             )));
             for (idx, (count, label, label_layout)) in izip!(
@@ -205,8 +174,28 @@ impl Widget<HistogramData> for Histogram {
 
                 // data label
                 let label_width = label_layout.size().width;
-                ctx.draw_text(&label_layout, (mid_x - label_width * 0.5, height + 2.));
+                label_layout.draw(ctx, (mid_x - label_width * 0.5, height + 2.));
             }
         });
+
+        // title
+        let title_width = self.title_layout.size().width;
+        self.title_layout
+            .draw(ctx, ((size.width - title_width) * 0.5, 10.0));
+
+        // x axis
+        let x_axis = Line::new(
+            (graph_bounds.x0 - 1.0, graph_bounds.y1),
+            (graph_bounds.x1, graph_bounds.y1),
+        );
+        ctx.stroke(x_axis, &axes_brush, 2.0);
+        let x_label_width = self.x_label_layout.size().width;
+        self.x_label_layout.draw(
+            ctx,
+            ((size.width - x_label_width) * 0.5, size.height - 40.0),
+        );
+
+        // y axis
+        self.y_scale.as_mut().unwrap().draw(ctx, env);
     }
 }

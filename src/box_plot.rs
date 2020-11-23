@@ -1,61 +1,62 @@
 use druid::{
     im::Vector,
-    kurbo::{Affine, Circle, CircleSegment, Line, Point, Rect},
-    piet::{self, Text, TextLayout as _, TextLayoutBuilder as _},
-    text::TextStorage,
-    BoxConstraints, Color, Data, Env, Event, EventCtx, Insets, LayoutCtx, LifeCycle, LifeCycleCtx,
-    PaintCtx, RenderContext, Size, TextLayout, UpdateCtx, Widget,
+    kurbo::{Line, Rect},
+    theme::LABEL_COLOR,
+    ArcStr, BoxConstraints, Color, Data, Env, Event, EventCtx, KeyOrValue, LayoutCtx, LifeCycle,
+    LifeCycleCtx, PaintCtx, RenderContext, Size, TextLayout, UpdateCtx, Widget,
 };
-use std::{f64::consts::PI, sync::Arc};
 
 use crate::{
-    axes::{calc_next_tick, calc_tick_spacing, data_as_range, PositionedLayout, YScale},
+    axes::{data_as_range, Scale},
     GRAPH_INSETS,
 };
 
 /// A histogram of equal width categories
 #[derive(Debug, Clone, Data)]
 pub struct BoxPlotData {
-    pub title: Arc<str>,
+    pub title: ArcStr,
     pub data_points: Vector<f64>,
 }
 
 #[derive(Clone)]
 pub struct BoxPlot {
-    title_layout: TextLayout<Arc<str>>,
+    title_layout: TextLayout<ArcStr>,
     // retained sorted list of data points
     sorted_data_points: Option<Vec<f64>>,
+    graph_color: KeyOrValue<Color>,
     // retained state for rendering the y axis.
-    y_scale: Option<YScale>,
+    y_scale: Option<Scale>,
 }
 
 impl BoxPlot {
     pub fn new() -> Self {
         let mut title_layout = TextLayout::new();
-        title_layout.set_text_color(Color::BLACK);
         title_layout.set_text_size(20.);
         BoxPlot {
             title_layout,
             sorted_data_points: None,
+            graph_color: LABEL_COLOR.into(),
             y_scale: None,
         }
     }
 
     /// Rebuild any parts of the retained state that need rebuilding.
-    fn rebuild_as_needed(&mut self, ctx: &mut PaintCtx, data: &BoxPlotData, env: &Env) {
+    fn rebuild_if_needed(&mut self, ctx: &mut PaintCtx, data: &BoxPlotData, env: &Env) {
+        self.title_layout.rebuild_if_needed(ctx.text(), env);
         if self.sorted_data_points.is_none() {
             let mut dp: Vec<f64> = data.data_points.iter().copied().collect();
             dp.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
             self.sorted_data_points = Some(dp);
         }
-        if self.y_scale.is_none()
-            || matches!(self.y_scale.as_ref(), Some(scale) if scale.height() != ctx.size().height)
-        {
-            self.y_scale = Some(YScale::new(
-                data_as_range(self.sorted_data_points.as_ref().unwrap().iter().copied()),
-                self.graph_bounds(ctx.size()),
-            ));
+        if self.y_scale.is_none() {
+            self.y_scale = Some(Scale::new_y(data_as_range(
+                self.sorted_data_points.as_ref().unwrap().iter().copied(),
+            )));
         }
+        let graph_bounds = self.graph_bounds(ctx.size());
+        let y_scale = self.y_scale.as_mut().unwrap();
+        y_scale.set_graph_bounds(graph_bounds);
+        y_scale.rebuild_if_needed(ctx, env);
     }
 
     pub fn graph_bounds(&self, size: Size) -> Rect {
@@ -94,10 +95,15 @@ impl Widget<BoxPlotData> for BoxPlot {
                 self.title_layout.set_text(data.title.clone());
             }
         }
+        self.title_layout.needs_rebuild_after_update(ctx);
         if !Data::same(&old_data.data_points, &data.data_points) {
             if old_data.data_points != data.data_points {
                 self.sorted_data_points = None;
                 self.y_scale = None;
+            }
+        } else {
+            if let Some(y_scale) = self.y_scale.as_mut() {
+                y_scale.needs_rebuild_after_update(ctx);
             }
         }
     }
@@ -113,13 +119,12 @@ impl Widget<BoxPlotData> for BoxPlot {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, data: &BoxPlotData, env: &Env) {
-        self.rebuild_as_needed(ctx, data, env);
+        self.rebuild_if_needed(ctx, data, env);
         let size = ctx.size();
         let bounds = size.to_rect();
         let graph_bounds = self.graph_bounds(size);
-        let bg_brush = ctx.solid_brush(Color::hlc(0.0, 90.0, 0.0));
         let axes_brush = ctx.solid_brush(Color::hlc(0.0, 60.0, 0.0));
-        let text_brush = ctx.solid_brush(Color::BLACK);
+        let text_brush = ctx.solid_brush(Color::WHITE);
         let bar_brush = ctx.solid_brush(Color::hlc(0.0, 50.0, 50.0));
 
         // data stats
@@ -134,9 +139,7 @@ impl Widget<BoxPlotData> for BoxPlot {
         let data_qn90 = quantile(&data_points, 0.9);
         let data_max = *data_points.back().unwrap();
 
-        // background & title
-        ctx.fill(bounds, &bg_brush);
-        self.title_layout.rebuild_if_needed(ctx.text(), env);
+        // title
         let title_size = self.title_layout.size();
         self.title_layout
             .draw(ctx, ((size.width - title_size.width) * 0.5, 40.0));

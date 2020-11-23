@@ -1,51 +1,104 @@
-use crate::Range;
+use crate::{theme, Range};
 use druid::{
-    im::{vector, Vector},
     kurbo::{Line, Point, Rect},
-    text::{ArcStr, TextStorage},
-    Color, Env, PaintCtx, RenderContext, TextLayout,
+    text::TextStorage,
+    ArcStr, Color, Env, KeyOrValue, PaintCtx, RenderContext, Size, TextLayout, UpdateCtx,
 };
-use std::{convert::TryInto, sync::Arc};
 
 const SCALE_TICK_MARGIN: f64 = 5.;
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum Direction {
+    X,
+    Y,
+}
+
+impl Direction {
+    /// How many labels can we fit. It's a guess
+    fn max_labels(self, bounds: Rect) -> usize {
+        match self {
+            Direction::X => (bounds.width() / 100.).floor() as usize + 1,
+            Direction::Y => (bounds.height() / 40.).floor() as usize + 1,
+        }
+    }
+
+    fn label_position(self, bounds: Rect, t: f64, size: Size, margin: f64) -> Point {
+        let p = self.position(bounds, t);
+        match self {
+            Direction::X => Point::new(p - 0.5 * size.width, bounds.y1 + SCALE_TICK_MARGIN),
+            Direction::Y => Point::new(
+                bounds.x0 - size.width - SCALE_TICK_MARGIN,
+                p - 0.5 * size.height,
+            ),
+        }
+    }
+
+    fn position(self, bounds: Rect, t: f64) -> f64 {
+        match self {
+            Direction::X => bounds.x0 + t * bounds.width(),
+            Direction::Y => bounds.y1 - t * bounds.height(),
+        }
+    }
+
+    fn axis_line(self, Rect { x0, y0, x1, y1 }: Rect) -> Line {
+        match self {
+            Direction::X => Line::new((x0, y1), (x1, y1)),
+            Direction::Y => Line::new((x0, y0), (x0, y1)),
+        }
+    }
+}
 
 /// A struct for retaining text layout information for a y axis scale.
 ///
 /// [matplotlib ticker](https://github.com/matplotlib/matplotlib/blob/master/lib/matplotlib/ticker.py#L2057)
 /// is a good resource.
 #[derive(Clone)]
-pub struct YScale {
+pub struct Scale {
+    direction: Direction,
     /// (min, max) the range of the data we are graphing. Can overspill if you want gaps at the
     /// top/bottom, or include 0 if you want.
     data_range: Range,
     /// The graph area
-    graph_area: Rect,
-    /// Text color
-    text_color: Color,
+    graph_bounds: Rect,
     /// Axis/mark color
-    axis_color: Color,
+    axis_color: KeyOrValue<Color>,
     // retained
     /// Our computed scale. The length is the computed number of scale ticks we should show. Format
     /// is `(data value, y-coordinate of the tick)`
     scale_ticker: Option<Ticker>,
     /// Our computed text layouts for the tick labels.
-    layouts: Option<Vec<PositionedLayout<Arc<str>>>>,
+    layouts: Option<Vec<PositionedLayout<ArcStr>>>,
 }
 
-impl YScale {
+impl Scale {
     /// Create a new scale object.
     ///
     ///  - `data_range` is the range of the data, from lowest to highest.
-    ///  - `graph_area` is the rectangle where the graph will be drawn. We will draw outside this
+    ///  - `graph_bounds` is the rectangle where the graph will be drawn. We will draw outside this
     ///    area a bit.
-    pub fn new(data_range: impl Into<Range>, graph_area: Rect) -> Self {
-        YScale {
+    pub fn new(data_range: impl Into<Range>, direction: Direction) -> Self {
+        Scale {
+            direction,
             data_range: data_range.into(),
-            graph_area: graph_area.abs(),
-            text_color: Color::BLACK,
-            axis_color: Color::grey(0.5),
+            graph_bounds: Rect::ZERO,
+            axis_color: theme::AXES_COLOR.into(),
             scale_ticker: None,
             layouts: None,
+        }
+    }
+
+    pub fn new_y(data_range: impl Into<Range>) -> Self {
+        Self::new(data_range, Direction::Y)
+    }
+
+    pub fn new_x(data_range: impl Into<Range>) -> Self {
+        Self::new(data_range, Direction::X)
+    }
+
+    pub fn set_direction(&mut self, d: Direction) {
+        if self.direction != d {
+            self.direction = d;
+            self.invalidate();
         }
     }
 
@@ -56,18 +109,22 @@ impl YScale {
         }
     }
 
-    /// The height of the axis.
-    pub fn height(&self) -> f64 {
-        self.graph_area.height()
+    pub fn needs_rebuild_after_update(&mut self, ctx: &mut UpdateCtx) -> bool {
+        match self.layouts.as_mut() {
+            Some(layouts) => layouts
+                .iter_mut()
+                .any(|layout| layout.layout.needs_rebuild_after_update(ctx)),
+            None => false,
+        }
     }
 
     /// Rebuild the retained state, as needed.
-    pub fn build(&mut self, ctx: &mut PaintCtx, env: &Env) {
+    pub fn rebuild_if_needed(&mut self, ctx: &mut PaintCtx, env: &Env) {
         if self.scale_ticker.is_none() {
             self.layouts = None;
             self.scale_ticker = Some(Ticker::new(
                 self.data_range,
-                (self.graph_area.height() / 40.).floor() as usize,
+                self.direction.max_labels(self.graph_bounds),
             ));
         }
         if self.layouts.is_none() {
@@ -78,30 +135,39 @@ impl YScale {
                     .map(|tick| {
                         let mut layout =
                             TextLayout::from_text(ArcStr::from(tick.value.to_string()));
-                        layout.set_text_color(self.text_color.clone());
                         layout.rebuild_if_needed(ctx.text(), env);
                         let size = layout.size();
-                        let y_pos = self.graph_area.y1 - tick.t * self.graph_area.height();
-                        PositionedLayout {
-                            position: Point::new(
-                                self.graph_area.x0 - size.width - SCALE_TICK_MARGIN,
-                                y_pos - 0.5 * size.height,
+                        let mut layout = PositionedLayout {
+                            position: self.direction.label_position(
+                                self.graph_bounds,
+                                tick.t,
+                                layout.size(),
+                                SCALE_TICK_MARGIN,
                             ),
                             layout,
-                        }
+                        };
+                        layout.rebuild_if_needed(ctx, env);
+                        layout
                     })
                     .collect(),
             )
         }
     }
 
-    pub fn set_text_color(&mut self, color: Color) {
-        self.text_color = color.clone();
-        if let Some(layouts) = self.layouts.as_mut() {
-            for playout in layouts {
-                playout.layout.set_text_color(color.clone());
-            }
+    pub fn graph_bounds(&self) -> Rect {
+        self.graph_bounds
+    }
+
+    pub fn set_graph_bounds(&mut self, graph_bounds: Rect) {
+        let graph_bounds = graph_bounds.abs();
+        if self.graph_bounds != graph_bounds {
+            self.invalidate();
+            self.graph_bounds = graph_bounds;
         }
+    }
+
+    pub fn set_axis_color(&mut self, color: impl Into<KeyOrValue<Color>>) {
+        self.axis_color = color.into();
     }
 
     fn invalidate(&mut self) {
@@ -110,21 +176,20 @@ impl YScale {
     }
 
     pub fn draw(&mut self, ctx: &mut PaintCtx, env: &Env) {
-        self.build(ctx, env);
         // draw axis
-        let axis_brush = ctx.solid_brush(self.axis_color.clone());
-        ctx.stroke(
-            Line::new(
-                (self.graph_area.x0, self.graph_area.y0),
-                (self.graph_area.x0, self.graph_area.y1),
-            ),
-            &axis_brush,
-            1.,
-        );
+        let axis_brush = ctx.solid_brush(self.axis_color.resolve(env));
+        ctx.stroke(self.direction.axis_line(self.graph_bounds), &axis_brush, 2.);
         // draw tick labels
         for layout in self.layouts.as_mut().unwrap().iter_mut() {
-            layout.draw(ctx, env);
+            layout.draw(ctx);
         }
+    }
+
+    /// Convert a data point to a pixel location on this axis
+    pub fn pixel_location(&self, v: f64) -> f64 {
+        let (min, max) = self.data_range.into();
+        let t = (v - min) / (max - min);
+        self.direction.position(self.graph_bounds(), t)
     }
 }
 
@@ -136,8 +201,10 @@ pub struct PositionedLayout<T> {
 }
 
 impl<T: TextStorage> PositionedLayout<T> {
-    pub fn draw(&mut self, ctx: &mut PaintCtx, env: &Env) {
+    pub fn rebuild_if_needed(&mut self, ctx: &mut PaintCtx, env: &Env) {
         self.layout.rebuild_if_needed(ctx.text(), env);
+    }
+    pub fn draw(&mut self, ctx: &mut PaintCtx) {
         self.layout.draw(ctx, self.position)
     }
 }

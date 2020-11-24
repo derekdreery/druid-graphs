@@ -5,6 +5,7 @@ use druid::{
     ArcStr, BoxConstraints, Color, Data, Env, Event, EventCtx, KeyOrValue, LayoutCtx, LifeCycle,
     LifeCycleCtx, PaintCtx, RenderContext, Size, TextLayout, UpdateCtx, Widget,
 };
+use druid_lens_compose::ComposeLens;
 
 use crate::{
     axes::{data_as_range, Scale},
@@ -12,7 +13,7 @@ use crate::{
 };
 
 /// A histogram of equal width categories
-#[derive(Debug, Clone, Data)]
+#[derive(Debug, Clone, Data, ComposeLens)]
 pub struct BoxPlotData {
     pub title: ArcStr,
     pub data_points: Vector<f64>,

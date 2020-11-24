@@ -2,9 +2,9 @@ use anyhow::Error;
 use druid::widget::{Align, Flex, Label, Painter, TextBox, ViewSwitcher};
 use druid::{
     im::{vector, Vector},
-    AppLauncher, BoxConstraints, Color, Data, Env, Event, EventCtx, LayoutCtx, Lens, LifeCycle,
-    LifeCycleCtx, LocalizedString, PaintCtx, RenderContext, Size, UpdateCtx, Widget, WidgetExt,
-    WindowDesc,
+    lens, AppLauncher, ArcStr, BoxConstraints, Color, Data, Env, Event, EventCtx, LayoutCtx, Lens,
+    LensExt, LifeCycle, LifeCycleCtx, LocalizedString, PaintCtx, RenderContext, Size, UpdateCtx,
+    Widget, WidgetExt, WindowDesc,
 };
 use druid_graphs::{
     BoxPlot, BoxPlotData, Histogram, HistogramData, LineChart, LineChartData, PieChart,
@@ -20,7 +20,7 @@ const WINDOW_TITLE: LocalizedString<HelloState> =
 struct HelloState {
     active_tab_idx: usize,
     monica: MonicaData,
-    box_title: &'static str,
+    box_title: ArcStr,
 }
 
 fn main() {
@@ -33,7 +33,7 @@ fn main() {
     let initial_state = HelloState {
         active_tab_idx: 0,
         monica: MonicaData::load().unwrap(),
-        box_title: "Systolic BP",
+        box_title: "Systolic BP".into(),
     };
 
     // start the application
@@ -62,10 +62,45 @@ fn build_root_widget() -> impl Widget<HelloState> {
     let main_content = ViewSwitcher::new(
         |state: &HelloState, _env| state.active_tab_idx,
         move |tab_idx, state, env| match tab_idx {
-            0 => Histogram::new().lens(HistogramLens).boxed(),
-            1 => BoxPlot::new().lens(BoxPlotLens).fix_width(300.).boxed(),
-            2 => PieChart::new().lens(PieChartLens).boxed(),
-            3 => LineChart::new().lens(LineChartLens).boxed(),
+            0 => Histogram::new()
+                .lens(HistogramData::compose_lens(
+                    Constant("Distribution of BMI".into()),
+                    Constant("BMI".into()),
+                    Constant(vector![
+                        "10-15".into(),
+                        "15-20".into(),
+                        "20-25".into(),
+                        "25-30".into(),
+                        "30-35".into(),
+                        "35-40".into(),
+                        "40-45".into(),
+                        "45-50".into()
+                    ]),
+                    HelloState::monica.then(MonicaData::bucket_bmi),
+                ))
+                .boxed(),
+            1 => BoxPlot::new()
+                .lens(BoxPlotData::compose_lens(
+                    HelloState::box_title,
+                    HelloState::monica.then(MonicaData::systm),
+                ))
+                .fix_width(300.)
+                .boxed(),
+            2 => PieChart::new()
+                .lens(PieChartData::compose_lens(
+                    Constant("Gender".into()),
+                    Constant(vector!["female".into(), "male".into()]),
+                    HelloState::monica.then(MonicaData::bucket_sex),
+                ))
+                .boxed(),
+            3 => LineChart::new()
+                .lens(LineChartData::compose_lens(
+                    Constant("Blood pressure".into()),
+                    Constant(None),
+                    HelloState::monica.then(MonicaData::systm),
+                    Constant(None),
+                ))
+                .boxed(),
             _ => unreachable!(),
         },
     );
@@ -87,109 +122,9 @@ fn make_background(idx: usize) -> Painter<HelloState> {
     })
 }
 
-struct HistogramLens;
-
-impl Lens<HelloState, HistogramData> for HistogramLens {
-    fn with<V, F: FnOnce(&HistogramData) -> V>(&self, data: &HelloState, f: F) -> V {
-        f(&HistogramData {
-            title: "Distribution of BMI".into(),
-            x_axis_label: "BMI".into(),
-            x_axis: vector![
-                "10-15".into(),
-                "15-20".into(),
-                "20-25".into(),
-                "25-30".into(),
-                "30-35".into(),
-                "35-40".into(),
-                "40-45".into(),
-                "45-50".into()
-            ],
-            counts: data.monica.bucket_bmi(),
-        })
-    }
-    fn with_mut<V, F: FnOnce(&mut HistogramData) -> V>(&self, data: &mut HelloState, f: F) -> V {
-        f(&mut HistogramData {
-            title: "Distribution of BMI".into(),
-            x_axis_label: "BMI".into(),
-            x_axis: vector![
-                "10-15".into(),
-                "15-20".into(),
-                "20-25".into(),
-                "25-30".into(),
-                "30-35".into(),
-                "35-40".into(),
-                "40-45".into(),
-                "45-50".into()
-            ],
-            counts: data.monica.bucket_bmi(),
-        })
-    }
-}
-
-struct PieChartLens;
-
-impl Lens<HelloState, PieChartData> for PieChartLens {
-    fn with<V, F: FnOnce(&PieChartData) -> V>(&self, data: &HelloState, f: F) -> V {
-        f(&PieChartData {
-            title: "Gender".into(),
-            category_labels: vector!["Female".into(), "Male".into()],
-            counts: data.monica.bucket_sex(),
-        })
-    }
-    fn with_mut<V, F: FnOnce(&mut PieChartData) -> V>(&self, data: &mut HelloState, f: F) -> V {
-        f(&mut PieChartData {
-            title: "Gender".into(),
-            category_labels: vector!["Female".into(), "Male".into()],
-            counts: data.monica.bucket_sex(),
-        })
-    }
-}
-
-struct BoxPlotLens;
-
-impl Lens<HelloState, BoxPlotData> for BoxPlotLens {
-    fn with<V, F: FnOnce(&BoxPlotData) -> V>(&self, data: &HelloState, f: F) -> V {
-        f(&BoxPlotData {
-            title: data.box_title.into(),
-            data_points: data.monica.systm.clone(),
-        })
-    }
-    fn with_mut<V, F: FnOnce(&mut BoxPlotData) -> V>(&self, data: &mut HelloState, f: F) -> V {
-        // all updates are ignored for now.
-        let mut data_inner = BoxPlotData {
-            title: data.box_title.into(),
-            data_points: data.monica.systm.clone(),
-        };
-        f(&mut data_inner)
-    }
-}
-
-struct LineChartLens;
-
-impl Lens<HelloState, LineChartData> for LineChartLens {
-    fn with<V, F: FnOnce(&LineChartData) -> V>(&self, data: &HelloState, f: F) -> V {
-        f(&LineChartData {
-            title: "Blood Pressure".into(),
-            x_axis_label: None,
-            x_data: None,
-            y_data: data.monica.systm.clone(),
-        })
-    }
-    fn with_mut<V, F: FnOnce(&mut LineChartData) -> V>(&self, data: &mut HelloState, f: F) -> V {
-        // all updates are ignored for now.
-        let mut data_inner = LineChartData {
-            title: "Blood Pressure".into(),
-            x_axis_label: None,
-            x_data: None,
-            y_data: data.monica.systm.clone(),
-        };
-        f(&mut data_inner)
-    }
-}
-
 // load monica data
 
-#[derive(Debug, Default, Clone, Data)]
+#[derive(Debug, Default, Clone, Data, Lens)]
 struct MonicaData {
     sex: Vector<u8>,
     marit: Vector<u8>,
@@ -198,6 +133,8 @@ struct MonicaData {
     systm: Vector<f64>,
     diastm: Vector<f64>,
     bmi: Vector<f64>,
+    bucket_bmi: Vector<usize>,
+    bucket_sex: Vector<usize>,
 }
 
 impl MonicaData {
@@ -215,11 +152,13 @@ impl MonicaData {
             data.diastm.push_back(record.get(5).unwrap().parse()?);
             data.bmi.push_back(record.get(6).unwrap().parse()?);
         }
+        data.calc_bucket_bmi();
+        data.calc_bucket_sex();
         Ok(data)
     }
 
     /// Collect BMI data into buckets.
-    fn bucket_bmi(&self) -> Vector<usize> {
+    fn calc_bucket_bmi(&mut self) {
         let mut out = vector![0, 0, 0, 0, 0, 0, 0, 0];
         for datum in self.bmi.iter().copied() {
             if datum <= 10.0 {
@@ -244,10 +183,10 @@ impl MonicaData {
                 panic!("very large bmi");
             }
         }
-        out
+        self.bucket_bmi = out;
     }
 
-    fn bucket_sex(&self) -> Vector<usize> {
+    fn calc_bucket_sex(&mut self) {
         let mut male = 0;
         let mut female = 0;
         for datum in self.sex.iter().copied() {
@@ -257,6 +196,20 @@ impl MonicaData {
                 _ => panic!("invalid sex"),
             }
         }
-        vector![female, male]
+        self.bucket_sex = vector![female, male];
+    }
+}
+
+/// A lens that always gives the same value and discards changes.
+#[derive(Debug, Copy, Clone)]
+pub struct Constant<T>(pub T);
+
+impl<A, B: Clone> Lens<A, B> for Constant<B> {
+    fn with<V, F: FnOnce(&B) -> V>(&self, _: &A, f: F) -> V {
+        f(&self.0)
+    }
+    fn with_mut<V, F: FnOnce(&mut B) -> V>(&self, _: &mut A, f: F) -> V {
+        let mut tmp = self.0.clone();
+        f(&mut tmp)
     }
 }

@@ -6,12 +6,13 @@ use druid::{
     ArcStr, BoxConstraints, Color, Data, Env, Event, EventCtx, Insets, KeyOrValue, LayoutCtx,
     LifeCycle, LifeCycleCtx, PaintCtx, RenderContext, Size, TextLayout, UpdateCtx, Widget,
 };
+use druid_lens_compose::ComposeLens;
 use itertools::izip;
 use std::{cmp::Ordering, f64::consts::PI, iter};
 
 use crate::{new_color, square, theme};
 
-#[derive(Debug, Clone, Data)]
+#[derive(Debug, Clone, Data, ComposeLens)]
 pub struct PieChartData {
     pub title: ArcStr,
     pub category_labels: Vector<ArcStr>,

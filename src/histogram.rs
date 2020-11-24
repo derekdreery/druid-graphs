@@ -4,6 +4,7 @@ use druid::{
     ArcStr, BoxConstraints, Color, Data, Env, Event, EventCtx, KeyOrValue, LayoutCtx, LifeCycle,
     LifeCycleCtx, PaintCtx, RenderContext, Size, TextLayout, UpdateCtx, Widget,
 };
+use druid_lens_compose::ComposeLens;
 use itertools::izip;
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use crate::{
 };
 
 /// A histogram of equal width categories
-#[derive(Debug, Clone, Data)]
+#[derive(Debug, Clone, Data, ComposeLens)]
 pub struct HistogramData {
     pub title: ArcStr,
     pub x_axis_label: ArcStr,

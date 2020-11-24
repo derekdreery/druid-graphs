@@ -133,8 +133,7 @@ impl Scale {
                     .unwrap()
                     .into_iter()
                     .map(|tick| {
-                        let mut layout =
-                            TextLayout::from_text(ArcStr::from(tick.value.to_string()));
+                        let mut layout = TextLayout::from_text(for_label(tick.value));
                         layout.rebuild_if_needed(ctx.text(), env);
                         let size = layout.size();
                         let mut layout = PositionedLayout {
@@ -390,14 +389,14 @@ fn text_pow_10_just_too_many() {
     ] {
         let range = Range::new(min, max);
         let step = pow_10_just_too_many(range, num_ticks);
-        assert!(
+        debug_assert!(
             count_ticks(range, step) > num_ticks,
             "count_ticks({:?}, {}) > {}",
             range,
             step,
             num_ticks
         );
-        assert!(
+        debug_assert!(
             count_ticks(range, step * 10.) <= num_ticks,
             "count_ticks({??}, {}) <= {}",
             range,
@@ -425,4 +424,15 @@ pub fn data_as_range(mut data: impl Iterator<Item = f64>) -> Range {
         }
     }
     (min, max).into()
+}
+
+/// Formats a tick value for a label
+fn for_label(v: f64) -> ArcStr {
+    let vabs = v.abs();
+    if vabs < 1000. && vabs > 0.0001 || vabs == 0. {
+        format!("{:.2}", v)
+    } else {
+        format!("{:.2e}", v)
+    }
+    .into()
 }

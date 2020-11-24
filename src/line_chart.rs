@@ -1,8 +1,8 @@
 use druid::{
     im::Vector,
     kurbo::{Affine, Line, Point, Rect},
-    ArcStr, BoxConstraints, Color, Data, Env, Event, EventCtx, KeyOrValue, LayoutCtx, LifeCycle,
-    LifeCycleCtx, PaintCtx, RenderContext, Size, TextLayout, UpdateCtx, Widget,
+    ArcStr, BoxConstraints, Color, Data, Env, Event, EventCtx, KeyOrValue, LayoutCtx, Lens,
+    LifeCycle, LifeCycleCtx, PaintCtx, RenderContext, Size, TextLayout, UpdateCtx, Widget,
 };
 use itertools::{izip, Itertools};
 use std::{iter, sync::Arc};
@@ -22,6 +22,41 @@ pub struct LineChartData {
     pub x_data: Option<Vector<f64>>,
 }
 
+struct LineChartDataLens<L1, L2> {
+    title: L1,
+    data: L2,
+}
+
+impl<T, L1, L2> Lens<T, LineChartData> for LineChartDataLens<L1, L2>
+where
+    L1: Lens<T, ArcStr>,
+    L2: Lens<T, Vector<f64>>,
+{
+    fn with<V, F: FnOnce(&LineChartData) -> V>(&self, data: &T, f: F) -> V {
+        let title = self.title.with(data, |v| v.clone());
+        let data = self.data.with(data, |v| v.clone());
+        let data = LineChartData {
+            title,
+            x_axis_label: None,
+            y_data: data,
+            x_data: None,
+        };
+        f(&data)
+    }
+    fn with_mut<V, F: FnOnce(&mut LineChartData) -> V>(&self, data: &mut T, f: F) -> V {
+        let title = self.title.with(data, |v| v.clone());
+        let data = self.data.with(data, |v| v.clone());
+        let mut data = LineChartData {
+            title,
+            x_axis_label: None,
+            y_data: data,
+            x_data: None,
+        };
+        // discard changes (for now)
+        f(&mut data)
+    }
+}
+
 pub struct LineChart {
     // retained state
     title_layout: TextLayout<ArcStr>,
@@ -39,6 +74,14 @@ pub struct LineChart {
 }
 
 impl LineChart {
+    /// A helper for making a lens from your data.
+    pub fn make_lens<T>(
+        title: impl Lens<T, ArcStr>,
+        data: impl Lens<T, Vector<f64>>,
+    ) -> impl Lens<T, LineChartData> {
+        LineChartDataLens { title, data }
+    }
+
     pub fn new() -> Self {
         let mut title_layout = TextLayout::new();
         title_layout.set_text_size(20.);

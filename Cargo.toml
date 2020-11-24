@@ -9,7 +9,7 @@ license = "MIT/Apache-2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-druid = { version = "0.6.0", features = ["im"] }
+druid = { git = "https://github.com/linebender/druid", features = ["im"] }
 anyhow = "1.0.28"
 csv = "1.1.3"
 itertools = "0.9.0"
@@ -17,5 +17,5 @@ log = "0.4.11"
 
 [patch.crates-io]
 #kurbo = { version = "0.5.11", path = "../../contrib/kurbo" }
-druid = { version = "0.6", path = "../../contrib/druid/druid" }
+#druid = { version = "0.6", path = "../../contrib/druid/druid" }
 #piet = { path = "../../contrib/piet/piet" }

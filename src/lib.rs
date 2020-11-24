@@ -18,7 +18,7 @@ pub use crate::{
     theme::add_to_env,
 };
 
-const GRAPH_INSETS: Insets = Insets::new(-40.0, -100.0, -40.0, -60.0);
+const GRAPH_INSETS: Insets = Insets::new(-200.0, -100.0, -40.0, -60.0);
 
 fn new_color(idx: usize) -> Color {
     let idx = idx as f64;

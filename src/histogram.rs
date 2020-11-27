@@ -197,6 +197,6 @@ impl Widget<HistogramData> for Histogram {
         );
 
         // y axis
-        self.y_scale.as_mut().unwrap().draw(ctx, env);
+        self.y_scale.as_mut().unwrap().draw(ctx, env, true, true);
     }
 }

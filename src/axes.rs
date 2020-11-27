@@ -1,9 +1,12 @@
+// TODO implement toPrecision from javascript - it gives better results.
+// TODO decide how to handle when data range only contains single value, stretch: infinity.
 use crate::{theme, Range};
 use druid::{
     kurbo::{Line, Point, Rect},
     text::TextStorage,
     ArcStr, Color, Env, KeyOrValue, PaintCtx, RenderContext, Size, TextLayout, UpdateCtx,
 };
+use to_precision::FloatExt as _;
 
 const SCALE_TICK_MARGIN: f64 = 5.;
 
@@ -52,7 +55,7 @@ impl Direction {
 ///
 /// [matplotlib ticker](https://github.com/matplotlib/matplotlib/blob/master/lib/matplotlib/ticker.py#L2057)
 /// is a good resource.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Scale {
     direction: Direction,
     /// (min, max) the range of the data we are graphing. Can overspill if you want gaps at the
@@ -68,6 +71,8 @@ pub struct Scale {
     scale_ticker: Option<Ticker>,
     /// Our computed text layouts for the tick labels.
     layouts: Option<Vec<PositionedLayout<ArcStr>>>,
+    /// The max size of the layouts.
+    max_layout: Option<Size>,
 }
 
 impl Scale {
@@ -84,6 +89,7 @@ impl Scale {
             axis_color: theme::AXES_COLOR.into(),
             scale_ticker: None,
             layouts: None,
+            max_layout: None,
         }
     }
 
@@ -111,9 +117,15 @@ impl Scale {
 
     pub fn needs_rebuild_after_update(&mut self, ctx: &mut UpdateCtx) -> bool {
         match self.layouts.as_mut() {
-            Some(layouts) => layouts
-                .iter_mut()
-                .any(|layout| layout.layout.needs_rebuild_after_update(ctx)),
+            Some(layouts) => {
+                // we need to loop manually to avoid short-circuit we would get with
+                // `Iterator::any`.
+                let mut needs_rebuild = false;
+                for layout in layouts.iter_mut() {
+                    needs_rebuild |= layout.layout.needs_rebuild_after_update(ctx);
+                }
+                needs_rebuild
+            }
             None => false,
         }
     }
@@ -133,7 +145,8 @@ impl Scale {
                     .unwrap()
                     .into_iter()
                     .map(|tick| {
-                        let mut layout = TextLayout::from_text(for_label(tick.value));
+                        let mut layout =
+                            TextLayout::from_text(format!("{}", tick.value.to_precision(5)));
                         layout.rebuild_if_needed(ctx.text(), env);
                         let size = layout.size();
                         let mut layout = PositionedLayout {
@@ -149,8 +162,9 @@ impl Scale {
                         layout
                     })
                     .collect(),
-            )
+            );
         }
+        self.rebuild_max_layout();
     }
 
     pub fn graph_bounds(&self) -> Rect {
@@ -169,18 +183,51 @@ impl Scale {
         self.axis_color = color.into();
     }
 
+    /// You must have build layouts before calling this
+    pub fn max_layout(&self) -> Size {
+        self.max_layout.unwrap()
+    }
+
     fn invalidate(&mut self) {
         self.scale_ticker = None;
         self.layouts = None;
+        self.max_layout = None;
     }
 
-    pub fn draw(&mut self, ctx: &mut PaintCtx, env: &Env) {
+    /// Make sure the max layout is sync'd with the layouts.
+    fn rebuild_max_layout(&mut self) {
+        if self.max_layout.is_some() {
+            // no need to rebuild
+            return;
+        }
+        let mut max_width = 0.;
+        let mut max_height = 0.;
+        for layout in self.layouts.as_ref().unwrap() {
+            let Size { width, height } = layout.layout.size();
+            if width > max_width {
+                max_width = width;
+            }
+            if height > max_height {
+                max_height = height;
+            }
+        }
+        self.max_layout = Some(Size {
+            width: max_width,
+            height: max_height,
+        });
+    }
+
+    pub fn draw(&mut self, ctx: &mut PaintCtx, env: &Env, draw_axis: bool, draw_labels: bool) {
         // draw axis
-        let axis_brush = ctx.solid_brush(self.axis_color.resolve(env));
-        ctx.stroke(self.direction.axis_line(self.graph_bounds), &axis_brush, 2.);
+        if draw_axis {
+            let axis_brush = ctx.solid_brush(self.axis_color.resolve(env));
+            ctx.stroke(self.direction.axis_line(self.graph_bounds), &axis_brush, 2.);
+        }
         // draw tick labels
-        for layout in self.layouts.as_mut().unwrap().iter_mut() {
-            layout.draw(ctx);
+        if draw_labels {
+            for layout in self.layouts.as_mut().unwrap().iter_mut() {
+                layout.draw(ctx);
+            }
         }
     }
 
@@ -192,7 +239,7 @@ impl Scale {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PositionedLayout<T> {
     /// The position that the layout should be displayed.
     pub position: Point,
@@ -220,7 +267,7 @@ pub struct Ticker {
 
 impl Ticker {
     pub fn new(data_range: Range, target_num_points: usize) -> Self {
-        let spacing = calc_tick_spacing(data_range, target_num_points as f64);
+        let spacing = calc_tick_spacing(data_range, target_num_points);
         Self {
             data_range,
             target_num_points,
@@ -236,6 +283,7 @@ impl Ticker {
     }
 }
 
+// Ticker is `Copy`able, so pass by value to iter.
 impl IntoIterator for Ticker {
     type IntoIter = TickerIter;
     type Item = Tick;
@@ -312,12 +360,27 @@ impl Iterator for TickerIter {
 ///
 /// `max_value` is the maximum value that will be graphed, and `target_count` is the maximum number
 /// of increments of the y axis scale we want.
-pub fn calc_tick_spacing(range: Range, target_count: f64) -> f64 {
-    if target_count < 1. {
-        // We don't support a number of ticks less than 1.
+pub fn calc_tick_spacing(range: Range, target_count: usize) -> f64 {
+    if target_count <= 1 || range.size() == 0. {
+        // We don't support a number of ticks less than 2.
         return f64::NAN;
     }
     let too_many_10s = pow_10_just_too_many(range, target_count);
+    debug_assert!(
+        count_ticks_slow(range, too_many_10s) > target_count,
+        "count_ticks({:?}, {}) > {}",
+        range,
+        too_many_10s,
+        target_count
+    );
+    debug_assert!(
+        count_ticks_slow(range, too_many_10s * 10.) <= target_count,
+        "count_ticks({:?}, {}) = {} <= {}",
+        range,
+        too_many_10s * 10.,
+        count_ticks_slow(range, too_many_10s * 10.),
+        target_count
+    );
     // try 2 * our power of 10 that gives too many
     if count_ticks(range, 2. * too_many_10s) <= target_count {
         return 2. * too_many_10s;
@@ -326,6 +389,7 @@ pub fn calc_tick_spacing(range: Range, target_count: f64) -> f64 {
     if count_ticks(range, 5. * too_many_10s) <= target_count {
         return 5. * too_many_10s;
     }
+    debug_assert!(count_ticks(range, 10. * too_many_10s) <= target_count);
     // then it must be the next power of 10
     too_many_10s * 10.
 }
@@ -333,16 +397,17 @@ pub fn calc_tick_spacing(range: Range, target_count: f64) -> f64 {
 /// Find a value of type 10<sup>x</sup> where x is an integer, such that ticks at that distance
 /// would result in too many ticks, but ticks at 10<sup>x+1</sup> would give too few (or just
 /// right). Returns spacing of ticks
-fn pow_10_just_too_many(range: Range, num_ticks: f64) -> f64 {
+fn pow_10_just_too_many(range: Range, num_ticks: usize) -> f64 {
     // -1 for fence/fence post
-    let num_ticks = num_ticks - 1.;
+    let num_ticks = (num_ticks - 1) as f64;
     let ideal_spacing = range.size() / num_ticks;
-    let spacing = (10.0f64).powf(ideal_spacing.log10().floor());
+    let mut spacing = (10.0f64).powf(ideal_spacing.log10().floor());
     // The actual value where the first tick will go (we need to work out if we lose too much space
     // at the ends and we end up being too few instead of too many)
     let first_tick = calc_next_tick(range.min(), spacing);
     // If when taking account of the above we still have too many ticks
-    if first_tick + num_ticks * (spacing + 1.) < calc_prev_tick(range.max(), spacing) {
+    // we already -1 from num_ticks.
+    if first_tick + num_ticks * spacing < calc_prev_tick(range.max(), spacing) {
         // then just return
         spacing
     } else {
@@ -354,7 +419,7 @@ fn pow_10_just_too_many(range: Range, num_ticks: f64) -> f64 {
 /// Get the location of the first tick of the given spacing after the value.
 #[inline]
 pub fn calc_next_tick(v: f64, spacing: f64) -> f64 {
-    // `prev tick <-> v`
+    // `v <-> next tick`
     let v_tick_diff = v.rem_euclid(spacing);
     if v_tick_diff == 0. {
         v
@@ -368,47 +433,25 @@ pub fn calc_next_tick(v: f64, spacing: f64) -> f64 {
 pub fn calc_prev_tick(v: f64, spacing: f64) -> f64 {
     // `prev tick <-> v`
     let v_tick_diff = v.rem_euclid(spacing);
-    v - v_tick_diff
+    if v_tick_diff == spacing {
+        v
+    } else {
+        v - v_tick_diff
+    }
 }
 
 /// Count the number of ticks between min and max using the given step
 #[inline]
-fn count_ticks(range: Range, tick_step: f64) -> f64 {
+fn count_ticks(range: Range, tick_step: f64) -> usize {
     let start = calc_next_tick(range.min(), tick_step);
     let end = calc_prev_tick(range.max(), tick_step);
-    ((end - start) / tick_step + 1.).floor() // fence/fencepost
-}
-
-#[test]
-fn text_pow_10_just_too_many() {
-    for (min, max, num_ticks) in vec![
-        (0., 100., 10.),
-        (-9., 109., 10.),
-        (-9., 99., 10.),
-        (1., 10., 1.),
-    ] {
-        let range = Range::new(min, max);
-        let step = pow_10_just_too_many(range, num_ticks);
-        debug_assert!(
-            count_ticks(range, step) > num_ticks,
-            "count_ticks({:?}, {}) > {}",
-            range,
-            step,
-            num_ticks
-        );
-        debug_assert!(
-            count_ticks(range, step * 10.) <= num_ticks,
-            "count_ticks({??}, {}) <= {}",
-            range,
-            step * 10.,
-            num_ticks
-        );
-    }
+    ((end - start) / tick_step).floor() as usize + 1 // fence/fencepost
 }
 
 /// Returns (min, max) of the vector.
 ///
 /// NaNs are propogated.
+#[inline]
 pub fn data_as_range(mut data: impl Iterator<Item = f64>) -> Range {
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;
@@ -426,13 +469,67 @@ pub fn data_as_range(mut data: impl Iterator<Item = f64>) -> Range {
     (min, max).into()
 }
 
-/// Formats a tick value for a label
-fn for_label(v: f64) -> ArcStr {
-    let vabs = v.abs();
-    if vabs < 1000. && vabs > 0.0001 || vabs == 0. {
-        format!("{:.2}", v)
-    } else {
-        format!("{:.2e}", v)
+#[inline]
+fn count_ticks_slow(range: Range, tick_step: f64) -> usize {
+    let mut start = calc_next_tick(range.min(), tick_step);
+    let end = calc_prev_tick(range.max(), tick_step);
+    let mut tick_count = 1;
+    while start <= end {
+        tick_count += 1;
+        start += tick_step;
     }
-    .into()
+    // correct for overshoot
+    tick_count - 1
+}
+
+#[test]
+fn test_prev_tick() {
+    for (val, step, expected) in vec![(1., 1., 1.), (1., 2., 0.), (-0.5, 1., -1.)] {
+        assert_eq!(calc_prev_tick(val, step), expected);
+    }
+}
+
+#[test]
+fn test_next_tick() {
+    for (val, step, expected) in vec![(1., 1., 1.), (1., 2., 2.)] {
+        assert_eq!(calc_next_tick(val, step), expected);
+    }
+}
+
+#[test]
+fn test_pow_10_just_too_many() {
+    for (min, max, num_ticks) in vec![
+        (0., 100., 10),
+        (-9., 109., 10),
+        (-9., 99., 10),
+        (1., 10., 2),
+        (0.0001, 0.0010, 10),
+    ] {
+        let range = Range::new(min, max);
+        let step = pow_10_just_too_many(range, num_ticks);
+        debug_assert!(
+            count_ticks_slow(range, step) > num_ticks,
+            "count_ticks({:?}, {}) = {} > {}",
+            range,
+            step,
+            count_ticks_slow(range, step),
+            num_ticks
+        );
+        debug_assert!(
+            count_ticks_slow(range, step * 10.) <= num_ticks,
+            "count_ticks({:?}, {}) = {} <= {}",
+            range,
+            step * 10.,
+            count_ticks_slow(range, step),
+            num_ticks
+        );
+    }
+}
+
+#[test]
+fn test_count_ticks() {
+    for (min, max, step) in vec![(1., 10., 2.)] {
+        let r = Range::new(min, max);
+        assert_eq!(count_ticks(r, step), count_ticks_slow(r, step));
+    }
 }

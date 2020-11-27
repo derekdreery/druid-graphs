@@ -1,8 +1,17 @@
+use druid::Data;
+use std::fmt;
+
 /// Maintains invariants: `-∞ < min <= max < ∞`
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, Data, PartialEq)]
 pub struct Range {
     min: f64,
     max: f64,
+}
+
+impl fmt::Debug for Range {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}..{}", self.min, self.max)
+    }
 }
 
 impl Range {
@@ -91,5 +100,11 @@ impl From<(f64, f64)> for Range {
 impl From<Range> for (f64, f64) {
     fn from(range: Range) -> (f64, f64) {
         (range.min(), range.max())
+    }
+}
+
+impl From<std::ops::Range<f64>> for Range {
+    fn from(range: std::ops::Range<f64>) -> Self {
+        Self::new(range.start, range.end)
     }
 }

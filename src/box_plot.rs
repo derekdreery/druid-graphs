@@ -151,7 +151,7 @@ impl Widget<BoxPlotData> for BoxPlot {
         };
 
         // y axis
-        self.y_scale.as_mut().unwrap().draw(ctx, env);
+        self.y_scale.as_mut().unwrap().draw(ctx, env, true, true);
 
         // data
         const PLOT_WIDTH: f64 = 32.0;

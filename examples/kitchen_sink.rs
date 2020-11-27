@@ -1,8 +1,10 @@
 use anyhow::Error;
-use druid::widget::{Align, Flex, Label, Painter, TextBox, ViewSwitcher};
 use druid::{
     im::{vector, Vector},
-    lens, AppLauncher, ArcStr, BoxConstraints, Color, Data, Env, Event, EventCtx, LayoutCtx, Lens,
+    lens,
+    theme::{WIDGET_PADDING_HORIZONTAL, WIDGET_PADDING_VERTICAL},
+    widget::{Align, Checkbox, CrossAxisAlignment, Flex, Label, Painter, TextBox, ViewSwitcher},
+    AppLauncher, ArcStr, BoxConstraints, Color, Data, Env, Event, EventCtx, LayoutCtx, Lens,
     LensExt, LifeCycle, LifeCycleCtx, LocalizedString, PaintCtx, RenderContext, Size, UpdateCtx,
     Widget, WidgetExt, WindowDesc,
 };
@@ -10,6 +12,7 @@ use druid_graphs::{
     BoxPlot, BoxPlotData, Histogram, HistogramData, LineChart, LineChartData, PieChart,
     PieChartData,
 };
+use std::sync::Arc;
 
 const VERTICAL_WIDGET_SPACING: f64 = 20.0;
 const TEXT_BOX_WIDTH: f64 = 200.0;
@@ -21,6 +24,12 @@ struct HelloState {
     active_tab_idx: usize,
     monica: MonicaData,
     box_title: ArcStr,
+    line_title: Arc<String>,
+    line_x_label: Arc<String>,
+    show_x_axis: bool,
+    show_x_tick_labels: bool,
+    show_y_axis: bool,
+    show_y_tick_labels: bool,
 }
 
 fn main() {
@@ -34,6 +43,12 @@ fn main() {
         active_tab_idx: 0,
         monica: MonicaData::load().unwrap(),
         box_title: "Systolic BP".into(),
+        line_title: Arc::new(String::from("Blood pressure")),
+        line_x_label: Arc::new(String::from("Person number (order meaningless)")),
+        show_x_axis: true,
+        show_x_tick_labels: true,
+        show_y_axis: true,
+        show_y_tick_labels: true,
     };
 
     // start the application
@@ -61,47 +76,91 @@ fn build_root_widget() -> impl Widget<HelloState> {
 
     let main_content = ViewSwitcher::new(
         |state: &HelloState, _env| state.active_tab_idx,
-        move |tab_idx, state, env| match tab_idx {
-            0 => Histogram::new()
-                .lens(HistogramData::compose_lens(
-                    Constant("Distribution of BMI".into()),
-                    Constant("BMI".into()),
-                    Constant(vector![
-                        "10-15".into(),
-                        "15-20".into(),
-                        "20-25".into(),
-                        "25-30".into(),
-                        "30-35".into(),
-                        "35-40".into(),
-                        "40-45".into(),
-                        "45-50".into()
-                    ]),
-                    HelloState::monica.then(MonicaData::bucket_bmi),
-                ))
-                .boxed(),
-            1 => BoxPlot::new()
-                .lens(BoxPlotData::compose_lens(
-                    HelloState::box_title,
-                    HelloState::monica.then(MonicaData::systm),
-                ))
-                .fix_width(300.)
-                .boxed(),
-            2 => PieChart::new()
-                .lens(PieChartData::compose_lens(
-                    Constant("Gender".into()),
-                    Constant(vector!["female".into(), "male".into()]),
-                    HelloState::monica.then(MonicaData::bucket_sex),
-                ))
-                .boxed(),
-            3 => LineChart::new()
-                .lens(LineChartData::compose_lens(
-                    Constant("Blood pressure".into()),
-                    Constant(None),
-                    HelloState::monica.then(MonicaData::systm),
-                    Constant(None),
-                ))
-                .boxed(),
-            _ => unreachable!(),
+        move |tab_idx, state, env| {
+            let vspace = env.get(WIDGET_PADDING_VERTICAL);
+            let hspace = env.get(WIDGET_PADDING_HORIZONTAL);
+            match tab_idx {
+                0 => Histogram::new()
+                    .lens(HistogramData::compose_lens(
+                        Constant("Distribution of BMI".into()),
+                        Constant("BMI".into()),
+                        Constant(vector![
+                            "10-15".into(),
+                            "15-20".into(),
+                            "20-25".into(),
+                            "25-30".into(),
+                            "30-35".into(),
+                            "35-40".into(),
+                            "40-45".into(),
+                            "45-50".into()
+                        ]),
+                        HelloState::monica.then(MonicaData::bucket_bmi),
+                    ))
+                    .boxed(),
+                1 => BoxPlot::new()
+                    .lens(BoxPlotData::compose_lens(
+                        HelloState::box_title,
+                        HelloState::monica.then(MonicaData::systm),
+                    ))
+                    .fix_width(300.)
+                    .boxed(),
+                2 => PieChart::new()
+                    .lens(PieChartData::compose_lens(
+                        Constant("Gender".into()),
+                        Constant(vector!["female".into(), "male".into()]),
+                        HelloState::monica.then(MonicaData::bucket_sex),
+                    ))
+                    .boxed(),
+                3 => Flex::row()
+                    .with_flex_child(
+                        LineChart::new().lens(LineChartData::compose_lens(
+                            HelloState::line_title,
+                            // x axis
+                            HelloState::line_x_label,
+                            Constant(None),
+                            HelloState::show_x_tick_labels,
+                            HelloState::show_x_axis,
+                            Constant(None),
+                            // y axis
+                            Constant(None),
+                            HelloState::show_y_tick_labels,
+                            HelloState::show_y_axis,
+                            HelloState::monica.then(MonicaData::systm),
+                        )),
+                        2.,
+                    )
+                    .with_spacer(hspace)
+                    .with_flex_child(
+                        Flex::column()
+                            .cross_axis_alignment(CrossAxisAlignment::Start)
+                            .with_child(Label::new("Chart title"))
+                            .with_child(TextBox::new().lens(HelloState::line_title).fix_width(300.))
+                            .with_spacer(vspace)
+                            .with_child(Label::new("X-axis label"))
+                            .with_child(
+                                TextBox::new()
+                                    .lens(HelloState::line_x_label)
+                                    .fix_width(300.),
+                            )
+                            .with_spacer(vspace)
+                            .with_child(Checkbox::new("show x axis").lens(HelloState::show_x_axis))
+                            .with_spacer(vspace)
+                            .with_child(
+                                Checkbox::new("show x value labels")
+                                    .lens(HelloState::show_x_tick_labels),
+                            )
+                            .with_spacer(vspace)
+                            .with_child(Checkbox::new("show y axis").lens(HelloState::show_y_axis))
+                            .with_spacer(vspace)
+                            .with_child(
+                                Checkbox::new("show y value labels")
+                                    .lens(HelloState::show_y_tick_labels),
+                            ),
+                        1.,
+                    )
+                    .boxed(),
+                _ => unreachable!(),
+            }
         },
     );
 
